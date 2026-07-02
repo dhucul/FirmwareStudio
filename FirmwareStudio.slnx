@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FirmwareStudio.Core/FirmwareStudio.Core.csproj" />
+    <Project Path="src/FirmwareStudio.Wpf/FirmwareStudio.Wpf.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/FirmwareStudio.Smoke/FirmwareStudio.Smoke.csproj" />
+  </Folder>
+</Solution>

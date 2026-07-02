@@ -1,0 +1,96 @@
+using FirmwareStudio.Core.Models;
+using FirmwareStudio.Core.Scsi;
+
+namespace FirmwareStudio.Core.Drives;
+
+/// <summary>
+/// Identifies the drive's controller family from INQUIRY vendor/model, then confirms with a harmless
+/// read-only vendor probe. v1 focuses on reliably spotting MediaTek (the common modern chipset), which is
+/// what routes the MediaTek cache-read extraction method. Ported from OptiScan's ScsiDrive.Chipset.cpp.
+/// </summary>
+public static class ChipsetDetector
+{
+    private readonly record struct Mapping(string VendorPrefix, string ModelPrefix, ChipsetFamily Family, string Name, int Confidence);
+
+    // First match wins; entries with a model prefix precede the vendor catch-all.
+    private static readonly Mapping[] Table =
+    {
+        new("LITE-ON",  "IHAS", ChipsetFamily.MediaTek, "MediaTek (LiteOn iHAS)",           90),
+        new("LITE-ON",  "IHBS", ChipsetFamily.MediaTek, "MediaTek MT1959 (LiteOn iHBS)",    90),
+        new("LITE-ON",  "",     ChipsetFamily.MediaTek, "MediaTek (LiteOn)",                75),
+        new("LITEON",   "",     ChipsetFamily.MediaTek, "MediaTek (LiteOn)",                75),
+        new("PLDS",     "",     ChipsetFamily.MediaTek, "MediaTek (Philips-LiteOn)",        75),
+        new("ASUS",     "",     ChipsetFamily.MediaTek, "MediaTek (ASUS OEM)",              70),
+        new("TSSTCORP", "",     ChipsetFamily.MediaTek, "MediaTek (Samsung/Toshiba OEM)",   70),
+        new("HL-DT-ST", "",     ChipsetFamily.MediaTek, "MediaTek (LG/HLDS)",               70),
+        new("HLDS",     "",     ChipsetFamily.MediaTek, "MediaTek (LG/HLDS)",               70),
+        new("SLIMTYPE", "",     ChipsetFamily.MediaTek, "MediaTek (Slimtype/LiteOn)",       70),
+        new("PIONEER",  "",     ChipsetFamily.Pioneer,  "Pioneer Custom",                   70),
+        new("OPTIARC",  "",     ChipsetFamily.Renesas,  "Renesas/NEC (Optiarc)",            65),
+        new("SONY",     "AD-",  ChipsetFamily.Renesas,  "Renesas/NEC (Sony Optiarc)",       65),
+        new("_NEC",     "",     ChipsetFamily.Renesas,  "Renesas/NEC",                      65),
+        new("NEC",      "",     ChipsetFamily.Renesas,  "Renesas/NEC",                      65),
+        new("MATSHITA", "",     ChipsetFamily.Panasonic,"Panasonic MN103",                  65),
+        new("PLEXTOR",  "",     ChipsetFamily.Other,    "Plextor (custom or MediaTek OEM)", 50),
+    };
+
+    public static ChipsetInfo Detect(ScsiDevice dev, DriveIdentity id)
+    {
+        var evidence = new List<string>();
+        var (family, name, conf) = FromTable(id.Vendor, id.Model);
+        evidence.Add(family == ChipsetFamily.Unknown
+            ? $"No vendor/model table match for \"{id.Vendor} {id.Model}\"."
+            : $"Vendor/model table: \"{id.Vendor} {id.Model}\" → {name} ({conf}%).");
+
+        // Confirmation probe: MediaTek read-cache (0xF1) is read-only. An ILLEGAL REQUEST (sense key 0x05 —
+        // invalid opcode OR invalid field) means the drive did not accept the command, so it is NOT a
+        // MediaTek cache-read drive; GOOD / not-ready / any other response confirms the command is understood.
+        try
+        {
+            var probe = dev.SendCommand(ScsiCommand.MediaTekReadCache(0, 64), ScsiDirection.In,
+                new byte[64], timeoutSec: 10, note: "chipset probe: MediaTek 0xF1 read-cache");
+            var s = probe.SenseInfo;
+            bool rejected = probe.DeviceIoOk && probe.ScsiStatus != 0x00 && s.Key == 0x05;
+
+            if (rejected)
+            {
+                evidence.Add($"MediaTek 0xF1 rejected (ILLEGAL REQUEST, asc={s.Asc:X2}/{s.Ascq:X2}) → not a MediaTek cache-read drive.");
+                if (family == ChipsetFamily.MediaTek) { conf = Math.Min(conf, 45); }
+            }
+            else if (probe.DeviceIoOk)
+            {
+                evidence.Add($"MediaTek 0xF1 accepted (status: {probe.StatusText}) → MediaTek cache-read supported.");
+                family = ChipsetFamily.MediaTek;
+                if (name.StartsWith("MediaTek", StringComparison.OrdinalIgnoreCase) == false)
+                    name = "MediaTek (confirmed by vendor command)";
+                conf = Math.Max(conf, 92);
+            }
+            else
+            {
+                evidence.Add("MediaTek 0xF1 probe could not be issued; leaving table result.");
+            }
+        }
+        catch (Exception ex)
+        {
+            evidence.Add($"MediaTek probe skipped: {ex.Message}");
+        }
+
+        if (family == ChipsetFamily.Unknown) name = $"Unknown ({id.Vendor} {id.Model})".Trim();
+        return new ChipsetInfo(family, name, conf, evidence);
+    }
+
+    private static (ChipsetFamily, string, int) FromTable(string vendor, string model)
+    {
+        string v = vendor.Trim();
+        string m = model.Trim();
+        foreach (var e in Table)
+        {
+            if (StartsWithCI(v, e.VendorPrefix) && StartsWithCI(m, e.ModelPrefix))
+                return (e.Family, e.Name, e.Confidence);
+        }
+        return (ChipsetFamily.Unknown, "Unknown", 10);
+    }
+
+    private static bool StartsWithCI(string s, string prefix)
+        => prefix.Length == 0 || s.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+}

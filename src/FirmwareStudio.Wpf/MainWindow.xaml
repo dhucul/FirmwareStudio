@@ -1,0 +1,233 @@
+<Window x:Class="FirmwareStudio.Wpf.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="FirmwareStudio — Optical Drive Firmware Extractor"
+        Icon="FirmwareStudio.ico"
+        Width="1120" Height="760" MinWidth="900" MinHeight="580"
+        FontFamily="Segoe UI" FontSize="12.5">
+    <TabControl Margin="8">
+
+        <!-- ============================= TAB 1: Optical drive (SCSI) ============================= -->
+        <TabItem Header="Optical drive (SCSI)">
+            <Grid Margin="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                    <TextBlock Text="Drive" VerticalAlignment="Center" Foreground="{StaticResource TextSecondary}" Margin="0,0,8,0" />
+                    <ComboBox x:Name="DriveCombo" Width="320" DisplayMemberPath="Display" />
+                    <Button x:Name="RefreshButton" Content="Refresh" Margin="8,0,0,0" Click="OnRefresh" />
+                    <Button x:Name="IdentifyButton" Content="Identify" Margin="8,0,0,0" Click="OnIdentify" />
+                </StackPanel>
+
+                <Border Grid.Row="1" Background="{StaticResource WarnSoft}" BorderBrush="{StaticResource Warn}"
+                        BorderThickness="1" CornerRadius="4" Padding="10,7" Margin="0,0,0,10">
+                    <TextBlock TextWrapping="Wrap" Foreground="{StaticResource TextSecondary}"
+                               Text="Read-only tool — it never writes to or flashes a drive. Firmware extraction is chipset-specific: many drives expose nothing over software commands and can only be dumped with the Hardware (SPI flash) tab or an external programmer. Requires administrator rights." />
+                </Border>
+
+                <Grid Grid.Row="2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="400" MinWidth="320" />
+                        <ColumnDefinition Width="6" />
+                        <ColumnDefinition Width="*" MinWidth="360" />
+                    </Grid.ColumnDefinitions>
+
+                    <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto">
+                        <StackPanel>
+                            <Border Background="{StaticResource Surface}" CornerRadius="6" Padding="12" Margin="0,0,0,10">
+                                <StackPanel>
+                                    <TextBlock Text="Drive identity" FontWeight="SemiBold" Foreground="{StaticResource Accent}" Margin="0,0,0,8" />
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="110" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Vendor" Foreground="{StaticResource TextMuted}" Margin="0,2" />
+                                        <TextBlock Grid.Row="0" Grid.Column="1" x:Name="VendorText" Text="—" Margin="0,2" />
+                                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Model" Foreground="{StaticResource TextMuted}" Margin="0,2" />
+                                        <TextBlock Grid.Row="1" Grid.Column="1" x:Name="ModelText" Text="—" Margin="0,2" TextWrapping="Wrap" />
+                                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Firmware rev" Foreground="{StaticResource TextMuted}" Margin="0,2" />
+                                        <TextBlock Grid.Row="2" Grid.Column="1" x:Name="FwText" Text="—" Margin="0,2" />
+                                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Serial" Foreground="{StaticResource TextMuted}" Margin="0,2" />
+                                        <TextBlock Grid.Row="3" Grid.Column="1" x:Name="SerialText" Text="—" Margin="0,2" TextWrapping="Wrap" />
+                                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Bus" Foreground="{StaticResource TextMuted}" Margin="0,2" />
+                                        <TextBlock Grid.Row="4" Grid.Column="1" x:Name="BusText" Text="—" Margin="0,2" />
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Background="{StaticResource Surface}" CornerRadius="6" Padding="12" Margin="0,0,0,10">
+                                <StackPanel>
+                                    <TextBlock Text="Detected chipset" FontWeight="SemiBold" Foreground="{StaticResource Accent}" Margin="0,0,0,8" />
+                                    <TextBlock x:Name="ChipsetText" Text="—" TextWrapping="Wrap" />
+                                    <TextBlock x:Name="ChipEvidence" Text="" TextWrapping="Wrap" Foreground="{StaticResource TextMuted}"
+                                               FontSize="11.5" Margin="0,6,0,0" />
+                                </StackPanel>
+                            </Border>
+
+                            <Border Background="{StaticResource Surface}" CornerRadius="6" Padding="12" Margin="0,0,0,10">
+                                <StackPanel>
+                                    <TextBlock Text="Extraction methods" FontWeight="SemiBold" Foreground="{StaticResource Accent}" Margin="0,0,0,8" />
+                                    <StackPanel x:Name="MethodsPanel">
+                                        <TextBlock Text="Identify a drive to see which methods apply."
+                                                   Foreground="{StaticResource TextMuted}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Background="{StaticResource Surface}" CornerRadius="6" Padding="12">
+                                <StackPanel>
+                                    <TextBlock Text="Extract" FontWeight="SemiBold" Foreground="{StaticResource Accent}" Margin="0,0,0,8" />
+                                    <TextBlock Text="Method" Foreground="{StaticResource TextMuted}" Margin="0,0,0,4" />
+                                    <ComboBox x:Name="MethodCombo" DisplayMemberPath="Label" />
+                                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                        <Button x:Name="ExtractButton" Content="Extract firmware" Style="{StaticResource DangerButton}"
+                                                Padding="14,6" IsEnabled="False" Click="OnExtract" />
+                                        <Button x:Name="CancelButton" Content="Cancel" Margin="8,0,0,0" IsEnabled="False" Click="OnCancel" />
+                                    </StackPanel>
+                                    <ProgressBar x:Name="Progress" Margin="0,12,0,0" Minimum="0" Maximum="100" Value="0" />
+                                    <TextBlock x:Name="StageText" Text="" Foreground="{StaticResource TextMuted}" Margin="0,6,0,0" FontSize="11.5" />
+                                    <TextBlock x:Name="ResultText" Text="" TextWrapping="Wrap" Margin="0,8,0,0" />
+                                    <Button x:Name="SaveButton" Content="Save dump…" Style="{StaticResource RunButton}"
+                                            HorizontalAlignment="Left" Margin="0,10,0,0" IsEnabled="False" Click="OnSave" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <GridSplitter Grid.Column="1" Width="6" HorizontalAlignment="Stretch" Background="{StaticResource Outline}" />
+
+                    <Grid Grid.Column="2">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" MinHeight="120" />
+                            <RowDefinition Height="6" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" MinHeight="120" />
+                        </Grid.RowDefinitions>
+                        <TextBlock Grid.Row="0" Text="Command log" FontWeight="SemiBold" Foreground="{StaticResource Accent}" Margin="0,0,0,6" />
+                        <TextBox Grid.Row="1" x:Name="LogBox" IsReadOnly="True" TextWrapping="NoWrap"
+                                 FontFamily="Cascadia Mono, Consolas" FontSize="12"
+                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" VerticalContentAlignment="Top" />
+                        <GridSplitter Grid.Row="2" Height="6" HorizontalAlignment="Stretch" Background="{StaticResource Outline}" />
+                        <TextBlock Grid.Row="3" x:Name="PreviewHeader" Text="Dump preview" FontWeight="SemiBold" Foreground="{StaticResource Accent}" Margin="0,0,0,6" />
+                        <TextBox Grid.Row="4" x:Name="HexBox" IsReadOnly="True" TextWrapping="NoWrap"
+                                 FontFamily="Cascadia Mono, Consolas" FontSize="12"
+                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" VerticalContentAlignment="Top" />
+                    </Grid>
+                </Grid>
+            </Grid>
+        </TabItem>
+
+        <!-- ============================= TAB 2: Hardware (SPI flash) ============================= -->
+        <TabItem Header="Hardware (SPI flash)">
+            <Grid Margin="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0" Background="{StaticResource DangerSoft}" BorderBrush="{StaticResource Danger}"
+                        BorderThickness="1" CornerRadius="4" Padding="10,7" Margin="0,0,0,10">
+                    <TextBlock TextWrapping="Wrap" Foreground="{StaticResource TextSecondary}"
+                               Text="Voltage matters — match it or you destroy the chip. Most SPI flash (and virtually all optical-drive flash) is 3.3 V, but some chips (common in phones/SSDs) are 1.8 V. A 3.3 V or 5 V programmer will kill a 1.8 V chip. Cheap CH341A clones output 5 V (unsafe even for 3.3 V chips): use a 3.3 V-safe adapter, and add a dedicated 1.8 V adapter board in the chain for 1.8 V chips. Open the drive, clip a SOIC-8 test clip onto the flash chip. Read-only; experimental and untested against every adapter." />
+                </Border>
+
+                <Grid Grid.Row="1">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="400" MinWidth="320" />
+                        <ColumnDefinition Width="6" />
+                        <ColumnDefinition Width="*" MinWidth="360" />
+                    </Grid.ColumnDefinitions>
+
+                    <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto">
+                        <StackPanel>
+                            <Border Background="{StaticResource Surface}" CornerRadius="6" Padding="12" Margin="0,0,0,10">
+                                <StackPanel>
+                                    <TextBlock Text="USB adapter (CH341A)" FontWeight="SemiBold" Foreground="{StaticResource Accent}" Margin="0,0,0,8" />
+                                    <TextBlock x:Name="HwAdapterText" Text="Not connected." TextWrapping="Wrap" Foreground="{StaticResource TextMuted}" />
+                                    <Button x:Name="HwDetectButton" Content="Detect adapter" HorizontalAlignment="Left" Margin="0,10,0,0" Click="OnHwDetect" />
+                                </StackPanel>
+                            </Border>
+
+                            <Border Background="{StaticResource Surface}" CornerRadius="6" Padding="12" Margin="0,0,0,10">
+                                <StackPanel>
+                                    <TextBlock Text="Flash chip" FontWeight="SemiBold" Foreground="{StaticResource Accent}" Margin="0,0,0,8" />
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="110" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Chip" Foreground="{StaticResource TextMuted}" Margin="0,2" />
+                                        <TextBlock Grid.Row="0" Grid.Column="1" x:Name="HwChipNameText" Text="—" Margin="0,2" TextWrapping="Wrap" />
+                                        <TextBlock Grid.Row="1" Grid.Column="0" Text="JEDEC ID" Foreground="{StaticResource TextMuted}" Margin="0,2" />
+                                        <TextBlock Grid.Row="1" Grid.Column="1" x:Name="HwChipIdText" Text="—" Margin="0,2" />
+                                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Size" Foreground="{StaticResource TextMuted}" Margin="0,2" />
+                                        <TextBlock Grid.Row="2" Grid.Column="1" x:Name="HwChipSizeText" Text="—" Margin="0,2" />
+                                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Voltage" Foreground="{StaticResource TextMuted}" Margin="0,2" />
+                                        <TextBlock Grid.Row="3" Grid.Column="1" x:Name="HwChipVoltageText" Text="—" Margin="0,2" TextWrapping="Wrap" />
+                                    </Grid>
+                                    <Button x:Name="HwIdentifyButton" Content="Identify chip" HorizontalAlignment="Left" Margin="0,10,0,0" Click="OnHwIdentify" />
+                                </StackPanel>
+                            </Border>
+
+                            <Border Background="{StaticResource Surface}" CornerRadius="6" Padding="12">
+                                <StackPanel>
+                                    <TextBlock Text="Read firmware" FontWeight="SemiBold" Foreground="{StaticResource Accent}" Margin="0,0,0,8" />
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button x:Name="HwReadButton" Content="Read flash" Style="{StaticResource DangerButton}"
+                                                Padding="14,6" IsEnabled="False" Click="OnHwRead" />
+                                        <Button x:Name="HwCancelButton" Content="Cancel" Margin="8,0,0,0" IsEnabled="False" Click="OnHwCancel" />
+                                    </StackPanel>
+                                    <ProgressBar x:Name="HwProgress" Margin="0,12,0,0" Minimum="0" Maximum="100" Value="0" />
+                                    <TextBlock x:Name="HwStageText" Text="" Foreground="{StaticResource TextMuted}" Margin="0,6,0,0" FontSize="11.5" />
+                                    <TextBlock x:Name="HwResultText" Text="" TextWrapping="Wrap" Margin="0,8,0,0" />
+                                    <Button x:Name="HwSaveButton" Content="Save dump…" Style="{StaticResource RunButton}"
+                                            HorizontalAlignment="Left" Margin="0,10,0,0" IsEnabled="False" Click="OnHwSave" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <GridSplitter Grid.Column="1" Width="6" HorizontalAlignment="Stretch" Background="{StaticResource Outline}" />
+
+                    <Grid Grid.Column="2">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" MinHeight="120" />
+                            <RowDefinition Height="6" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" MinHeight="120" />
+                        </Grid.RowDefinitions>
+                        <TextBlock Grid.Row="0" Text="SPI log" FontWeight="SemiBold" Foreground="{StaticResource Accent}" Margin="0,0,0,6" />
+                        <TextBox Grid.Row="1" x:Name="HwLogBox" IsReadOnly="True" TextWrapping="NoWrap"
+                                 FontFamily="Cascadia Mono, Consolas" FontSize="12"
+                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" VerticalContentAlignment="Top" />
+                        <GridSplitter Grid.Row="2" Height="6" HorizontalAlignment="Stretch" Background="{StaticResource Outline}" />
+                        <TextBlock Grid.Row="3" x:Name="HwPreviewHeader" Text="Dump preview" FontWeight="SemiBold" Foreground="{StaticResource Accent}" Margin="0,0,0,6" />
+                        <TextBox Grid.Row="4" x:Name="HwHexBox" IsReadOnly="True" TextWrapping="NoWrap"
+                                 FontFamily="Cascadia Mono, Consolas" FontSize="12"
+                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" VerticalContentAlignment="Top" />
+                    </Grid>
+                </Grid>
+            </Grid>
+        </TabItem>
+    </TabControl>
+</Window>
