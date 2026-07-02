@@ -31,6 +31,10 @@ public static class ChipsetDetector
         new("_NEC",     "",     ChipsetFamily.Renesas,  "Renesas/NEC",                      65),
         new("NEC",      "",     ChipsetFamily.Renesas,  "Renesas/NEC",                      65),
         new("MATSHITA", "",     ChipsetFamily.Panasonic,"Panasonic MN103",                  65),
+        // Modern Plextor PX-8xx (e.g. PX-891SAF/PLUS) are PLDS/Lite-On builds on a MediaTek MT62xx controller
+        // (confirmed "MT62SA" in the PX-891SAF updater); the vendor 0xDF command applies. Older Plextor drives
+        // (Premium, PX-7xxA) were custom, so the bare-vendor fallback stays "Other".
+        new("PLEXTOR",  "PX-8", ChipsetFamily.MediaTek, "MediaTek MT62xx (Plextor/PLDS PX-8xx)", 80),
         new("PLEXTOR",  "",     ChipsetFamily.Other,    "Plextor (custom or MediaTek OEM)", 50),
     };
 

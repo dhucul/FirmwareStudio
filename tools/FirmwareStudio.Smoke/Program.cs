@@ -14,6 +14,24 @@ Console.WriteLine(layout is null
     : $"[FAIL] {layout}");
 if (layout is not null) return 2;
 
+// 1b. PLDS/Lite-On vendor command 0xDF CDB shape (offline) — must match the Plextor PX-891SAF updater's
+//     drive-state read (mode 0, bufferId 0x0F, arg3 0x20): DF 00 0F 20 00 ... (12-byte CDB).
+{
+    byte[] cdb = ScsiCommand.PldsVendor(0x00, 0x0F, 0x20, 0x00);
+    bool tailZero = true;
+    for (int i = 5; i < cdb.Length; i++) if (cdb[i] != 0) tailZero = false;
+    bool shapeOk = cdb.Length == 12 && cdb[0] == 0xDF && cdb[1] == 0x00 && cdb[2] == 0x0F
+                   && cdb[3] == 0x20 && cdb[4] == 0x00 && tailZero;
+    Console.WriteLine(shapeOk
+        ? "[OK]   PLDS 0xDF CDB builder: DF 00 0F 20 00 ... (12 bytes)"
+        : $"[FAIL] PLDS 0xDF CDB wrong: {Convert.ToHexString(cdb)}");
+    bool registered = new ExtractionOrchestrator().ById("plds") is not null;
+    Console.WriteLine(registered
+        ? "[OK]   'plds' extraction method registered in the orchestrator."
+        : "[FAIL] 'plds' extraction method not registered.");
+    if (!shapeOk || !registered) return 2;
+}
+
 // 2. Enumerate optical drives (no handle, no elevation needed).
 var drives = DriveEnumerator.Scan();
 Console.WriteLine($"[OK]   Optical drives found: {drives.Count}");

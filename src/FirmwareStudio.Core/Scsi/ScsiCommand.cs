@@ -52,6 +52,18 @@ public static class ScsiCommand
         return cdb;
     }
 
+    /// <summary>
+    /// PLDS / Lite-On (Philips &amp; Lite-On Digital Solutions, a MediaTek OEM) vendor command 0xDF, as
+    /// issued by the Plextor PX-891SAF firmware updater. 12-byte CDB: [0]=0xDF [1]=mode [2]=bufferId
+    /// [3]=arg3 [4]=arg4, rest 0; data-in. The transfer length is the caller's buffer size — the CDB
+    /// carries no length field. The updater used (mode=0, bufferId=0x0F, arg3=0x20/0x14/0x11, arg4=0/1)
+    /// to read 12-byte drive-state registers; <b>mode 0 is the confirmed data-in direction</b>. Read-only.
+    /// Other <paramref name="mode"/> values are vendor subcommands of unknown effect — callers that want to
+    /// stay read-only must keep mode 0.
+    /// </summary>
+    public static byte[] PldsVendor(byte mode, byte bufferId, byte arg3 = 0x00, byte arg4 = 0x00)
+        => new byte[] { 0xDF, mode, bufferId, arg3, arg4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
     public static void WriteBe24(byte[] buf, int at, int value)
     {
         buf[at] = (byte)((value >> 16) & 0xFF);

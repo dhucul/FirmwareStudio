@@ -13,6 +13,7 @@ public sealed class ExtractionOrchestrator
         {
             new UniversalReadBufferMethod(),
             new MediaTekCacheReadMethod(),
+            new PldsVendorReadMethod(),
             new UhdServiceModeMethod(),
         };
 
