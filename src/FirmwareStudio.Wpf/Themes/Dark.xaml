@@ -228,6 +228,28 @@
         <Setter Property="HorizontalScrollBarVisibility" Value="Auto" />
     </Style>
 
+    <!-- Selectable read-only label: renders like a TextBlock (flat, transparent, no border) but supports
+         mouse-drag select + Ctrl+C and a right-click Copy menu. Used for the identity / chipset / method /
+         result fields in the extract panels so their text can be selected and copied. -->
+    <Style x:Key="ValueText" TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+        <Setter Property="IsReadOnly" Value="True" />
+        <Setter Property="IsTabStop" Value="False" />
+        <Setter Property="IsReadOnlyCaretVisible" Value="False" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="VerticalContentAlignment" Value="Top" />
+        <Setter Property="Cursor" Value="IBeam" />
+        <Style.Triggers>
+            <!-- A TextBox reserves a line of height even when empty; collapse it so blank result/evidence
+                 fields take no space (matching the old TextBlock layout). -->
+            <Trigger Property="Text" Value="">
+                <Setter Property="Visibility" Value="Collapsed" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
     <!-- Small ghost button for pane-header actions (e.g. Clear): transparent until hovered. -->
     <Style x:Key="SubtleButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
         <Setter Property="Background" Value="Transparent" />

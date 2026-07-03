@@ -61,15 +61,15 @@
                                             <RowDefinition Height="Auto" />
                                         </Grid.RowDefinitions>
                                         <TextBlock Grid.Row="0" Grid.Column="0" Text="Vendor" Foreground="{StaticResource TextMuted}" Margin="0,2" />
-                                        <TextBlock Grid.Row="0" Grid.Column="1" x:Name="VendorText" Text="—" Margin="0,2" />
+                                        <TextBox Grid.Row="0" Grid.Column="1" x:Name="VendorText" Text="—" Margin="0,2" Style="{StaticResource ValueText}" />
                                         <TextBlock Grid.Row="1" Grid.Column="0" Text="Model" Foreground="{StaticResource TextMuted}" Margin="0,2" />
-                                        <TextBlock Grid.Row="1" Grid.Column="1" x:Name="ModelText" Text="—" Margin="0,2" TextWrapping="Wrap" />
+                                        <TextBox Grid.Row="1" Grid.Column="1" x:Name="ModelText" Text="—" Margin="0,2" Style="{StaticResource ValueText}" />
                                         <TextBlock Grid.Row="2" Grid.Column="0" Text="Firmware rev" Foreground="{StaticResource TextMuted}" Margin="0,2" />
-                                        <TextBlock Grid.Row="2" Grid.Column="1" x:Name="FwText" Text="—" Margin="0,2" />
+                                        <TextBox Grid.Row="2" Grid.Column="1" x:Name="FwText" Text="—" Margin="0,2" Style="{StaticResource ValueText}" />
                                         <TextBlock Grid.Row="3" Grid.Column="0" Text="Serial" Foreground="{StaticResource TextMuted}" Margin="0,2" />
-                                        <TextBlock Grid.Row="3" Grid.Column="1" x:Name="SerialText" Text="—" Margin="0,2" TextWrapping="Wrap" />
+                                        <TextBox Grid.Row="3" Grid.Column="1" x:Name="SerialText" Text="—" Margin="0,2" Style="{StaticResource ValueText}" />
                                         <TextBlock Grid.Row="4" Grid.Column="0" Text="Bus" Foreground="{StaticResource TextMuted}" Margin="0,2" />
-                                        <TextBlock Grid.Row="4" Grid.Column="1" x:Name="BusText" Text="—" Margin="0,2" />
+                                        <TextBox Grid.Row="4" Grid.Column="1" x:Name="BusText" Text="—" Margin="0,2" Style="{StaticResource ValueText}" />
                                     </Grid>
                                 </StackPanel>
                             </Border>
@@ -77,9 +77,9 @@
                             <Border Background="{StaticResource Surface}" CornerRadius="6" Padding="12" Margin="0,0,0,10">
                                 <StackPanel>
                                     <TextBlock Text="Detected chipset" FontWeight="SemiBold" Foreground="{StaticResource Accent}" Margin="0,0,0,8" />
-                                    <TextBlock x:Name="ChipsetText" Text="—" TextWrapping="Wrap" />
-                                    <TextBlock x:Name="ChipEvidence" Text="" TextWrapping="Wrap" Foreground="{StaticResource TextMuted}"
-                                               FontSize="11.5" Margin="0,6,0,0" />
+                                    <TextBox x:Name="ChipsetText" Text="—" Style="{StaticResource ValueText}" />
+                                    <TextBox x:Name="ChipEvidence" Text="" Foreground="{StaticResource TextMuted}"
+                                             FontSize="11.5" Margin="0,6,0,0" Style="{StaticResource ValueText}" />
                                 </StackPanel>
                             </Border>
 
@@ -111,7 +111,7 @@
                                     </StackPanel>
                                     <ProgressBar x:Name="Progress" Margin="0,12,0,0" Minimum="0" Maximum="100" Value="0" />
                                     <TextBlock x:Name="StageText" Text="" Foreground="{StaticResource TextMuted}" Margin="0,6,0,0" FontSize="11.5" />
-                                    <TextBlock x:Name="ResultText" Text="" TextWrapping="Wrap" Margin="0,8,0,0" />
+                                    <TextBox x:Name="ResultText" Text="" Margin="0,8,0,0" Style="{StaticResource ValueText}" />
                                     <Button x:Name="SaveButton" Content="Save dump…" Style="{StaticResource RunButton}"
                                             HorizontalAlignment="Left" Margin="0,10,0,0" IsEnabled="False" Click="OnSave" />
                                 </StackPanel>
@@ -173,7 +173,7 @@
                             <Border Background="{StaticResource Surface}" CornerRadius="6" Padding="12" Margin="0,0,0,10">
                                 <StackPanel>
                                     <TextBlock Text="USB adapter (CH341A)" FontWeight="SemiBold" Foreground="{StaticResource Accent}" Margin="0,0,0,8" />
-                                    <TextBlock x:Name="HwAdapterText" Text="Not connected." TextWrapping="Wrap" Foreground="{StaticResource TextMuted}" />
+                                    <TextBox x:Name="HwAdapterText" Text="Not connected." Foreground="{StaticResource TextMuted}" Style="{StaticResource ValueText}" />
                                     <Button x:Name="HwDetectButton" Content="Detect adapter" HorizontalAlignment="Left" Margin="0,10,0,0" Click="OnHwDetect" />
                                 </StackPanel>
                             </Border>
@@ -193,13 +193,13 @@
                                             <RowDefinition Height="Auto" />
                                         </Grid.RowDefinitions>
                                         <TextBlock Grid.Row="0" Grid.Column="0" Text="Chip" Foreground="{StaticResource TextMuted}" Margin="0,2" />
-                                        <TextBlock Grid.Row="0" Grid.Column="1" x:Name="HwChipNameText" Text="—" Margin="0,2" TextWrapping="Wrap" />
+                                        <TextBox Grid.Row="0" Grid.Column="1" x:Name="HwChipNameText" Text="—" Margin="0,2" Style="{StaticResource ValueText}" />
                                         <TextBlock Grid.Row="1" Grid.Column="0" Text="JEDEC ID" Foreground="{StaticResource TextMuted}" Margin="0,2" />
-                                        <TextBlock Grid.Row="1" Grid.Column="1" x:Name="HwChipIdText" Text="—" Margin="0,2" />
+                                        <TextBox Grid.Row="1" Grid.Column="1" x:Name="HwChipIdText" Text="—" Margin="0,2" Style="{StaticResource ValueText}" />
                                         <TextBlock Grid.Row="2" Grid.Column="0" Text="Size" Foreground="{StaticResource TextMuted}" Margin="0,2" />
-                                        <TextBlock Grid.Row="2" Grid.Column="1" x:Name="HwChipSizeText" Text="—" Margin="0,2" />
+                                        <TextBox Grid.Row="2" Grid.Column="1" x:Name="HwChipSizeText" Text="—" Margin="0,2" Style="{StaticResource ValueText}" />
                                         <TextBlock Grid.Row="3" Grid.Column="0" Text="Voltage" Foreground="{StaticResource TextMuted}" Margin="0,2" />
-                                        <TextBlock Grid.Row="3" Grid.Column="1" x:Name="HwChipVoltageText" Text="—" Margin="0,2" TextWrapping="Wrap" />
+                                        <TextBox Grid.Row="3" Grid.Column="1" x:Name="HwChipVoltageText" Text="—" Margin="0,2" Style="{StaticResource ValueText}" />
                                     </Grid>
                                     <Button x:Name="HwIdentifyButton" Content="Identify chip" HorizontalAlignment="Left" Margin="0,10,0,0" Click="OnHwIdentify" />
                                 </StackPanel>
@@ -215,7 +215,7 @@
                                     </StackPanel>
                                     <ProgressBar x:Name="HwProgress" Margin="0,12,0,0" Minimum="0" Maximum="100" Value="0" />
                                     <TextBlock x:Name="HwStageText" Text="" Foreground="{StaticResource TextMuted}" Margin="0,6,0,0" FontSize="11.5" />
-                                    <TextBlock x:Name="HwResultText" Text="" TextWrapping="Wrap" Margin="0,8,0,0" />
+                                    <TextBox x:Name="HwResultText" Text="" Margin="0,8,0,0" Style="{StaticResource ValueText}" />
                                     <Button x:Name="HwSaveButton" Content="Save dump…" Style="{StaticResource RunButton}"
                                             HorizontalAlignment="Left" Margin="0,10,0,0" IsEnabled="False" Click="OnHwSave" />
                                 </StackPanel>

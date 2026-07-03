@@ -58,6 +58,15 @@ public partial class MainWindow : Window
         AttachCopyMenu(HwLogBox);
         AttachCopyMenu(HwHexBox);
 
+        // The identity / chipset / result fields in both extract panels are read-only TextBoxes (not
+        // TextBlocks) so their text can be selected and copied — same Copy menu, plus wheel-forwarding.
+        foreach (var box in new[]
+        {
+            VendorText, ModelText, FwText, SerialText, BusText, ChipsetText, ChipEvidence, ResultText,
+            HwAdapterText, HwChipNameText, HwChipIdText, HwChipSizeText, HwChipVoltageText, HwResultText,
+        })
+            AttachValueBox(box);
+
         RefreshDrives();
     }
 
@@ -75,6 +84,34 @@ public partial class MainWindow : Window
         };
         menu.Items.Add(copyAll);
         box.ContextMenu = menu;
+    }
+
+    // A selectable read-only value label: themed Copy menu, plus wheel-forwarding so the mouse wheel still
+    // scrolls the surrounding ScrollViewer when the pointer is over the (non-scrolling) field.
+    private void AttachValueBox(TextBox box)
+    {
+        AttachCopyMenu(box);
+        box.PreviewMouseWheel += ForwardWheelToParent;
+    }
+
+    private static void ForwardWheelToParent(object sender, MouseWheelEventArgs e)
+    {
+        if (e.Handled) return;
+        e.Handled = true;
+        if (((FrameworkElement)sender).Parent is UIElement parent)
+            parent.RaiseEvent(new MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta)
+            {
+                RoutedEvent = UIElement.MouseWheelEvent,
+                Source = sender,
+            });
+    }
+
+    // Build a selectable read-only label for the dynamically-generated method rows.
+    private TextBox MethodLabel(string text)
+    {
+        var box = new TextBox { Text = text, Style = (Style)FindResource("ValueText") };
+        AttachValueBox(box);
+        return box;
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -179,20 +216,19 @@ public partial class MainWindow : Window
             Grid.SetColumn(chipBadge, 0);
             header.Children.Add(chipBadge);
 
-            var name = new TextBlock
-            {
-                Text = m.DisplayName, Foreground = Palette.TextBrush, FontWeight = FontWeights.SemiBold,
-                TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center,
-            };
+            var name = MethodLabel(m.DisplayName);
+            name.Foreground = Palette.TextBrush;
+            name.FontWeight = FontWeights.SemiBold;
+            name.VerticalAlignment = VerticalAlignment.Center;
             Grid.SetColumn(name, 1);
             header.Children.Add(name);
 
             MethodsPanel.Children.Add(header);
-            MethodsPanel.Children.Add(new TextBlock
-            {
-                Text = a.Reason, Foreground = Palette.Overlay1Brush, FontSize = 11.5,
-                TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 12),
-            });
+            var reason = MethodLabel(a.Reason);
+            reason.Foreground = Palette.Overlay1Brush;
+            reason.FontSize = 11.5;
+            reason.Margin = new Thickness(0, 0, 0, 12);
+            MethodsPanel.Children.Add(reason);
         }
     }
 
