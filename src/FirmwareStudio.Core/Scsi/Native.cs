@@ -24,6 +24,13 @@ internal static class Native
     public const uint IOCTL_SCSI_PASS_THROUGH_DIRECT = 0x0004D014;
     // CTL_CODE(FILE_DEVICE_MASS_STORAGE=0x002D, 0x0500, METHOD_BUFFERED=0, FILE_ANY_ACCESS=0)
     public const uint IOCTL_STORAGE_QUERY_PROPERTY = 0x002D1400;
+    // CTL_CODE(IOCTL_SCSI_BASE=0x0004, 0x040c, METHOD_BUFFERED=0, FILE_READ_ACCESS|FILE_WRITE_ACCESS=3)
+    public const uint IOCTL_ATA_PASS_THROUGH_DIRECT = 0x0004D030;
+
+    // ---- ATA_PASS_THROUGH_DIRECT.AtaFlags ----
+    public const ushort ATA_FLAGS_DRDY_REQUIRED = 0x01;
+    public const ushort ATA_FLAGS_DATA_IN = 0x02;
+    public const ushort ATA_FLAGS_DATA_OUT = 0x04;
 
     // ---- SCSI_PASS_THROUGH_DIRECT.DataIn ----
     public const byte SCSI_IOCTL_DATA_OUT = 0;
@@ -61,6 +68,29 @@ internal static class Native
     {
         public SCSI_PASS_THROUGH_DIRECT Sptd;
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)] public byte[] Sense;
+    }
+
+    /// <summary>
+    /// Mirrors the Win32 <c>ATA_PASS_THROUGH_DIRECT</c> (ntddscsi.h). x64 natural layout is 48 bytes
+    /// (4-byte pad before the 8-byte <c>DataBuffer</c> pointer). <c>CurrentTaskFile</c> is the 8-byte ATA
+    /// task file: [0]=Features/Error [1]=SectorCount [2]=LBALow [3]=LBAMid [4]=LBAHigh [5]=Device
+    /// [6]=Command/Status [7]=reserved.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ATA_PASS_THROUGH_DIRECT
+    {
+        public ushort Length;
+        public ushort AtaFlags;
+        public byte PathId;
+        public byte TargetId;
+        public byte Lun;
+        public byte ReservedAsUchar;
+        public uint DataTransferLength;
+        public uint TimeOutValue;
+        public uint ReservedAsUlong;
+        public IntPtr DataBuffer;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)] public byte[] PreviousTaskFile;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)] public byte[] CurrentTaskFile;
     }
 
     // ---- STORAGE_QUERY_PROPERTY (friendly name + bus type; does not require elevation) ----

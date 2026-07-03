@@ -140,8 +140,9 @@ public sealed class ScsiDevice : IDisposable
     };
 
     /// <summary>
-    /// Verify the SPTD marshalled layout matches the OS ABI before any result is trusted:
-    /// 56-byte struct, sense at offset 56. Returns null if OK, else a description of the mismatch.
+    /// Verify the marshalled pass-through layouts match the OS ABI before any result is trusted: the SPTD
+    /// struct is 56 bytes with sense at offset 56, and ATA_PASS_THROUGH_DIRECT is 48 bytes. Returns null if
+    /// OK, else a description of the mismatch.
     /// </summary>
     public static string? VerifyLayout()
     {
@@ -150,7 +151,77 @@ public sealed class ScsiDevice : IDisposable
             nameof(Native.SCSI_PASS_THROUGH_DIRECT_WITH_SENSE.Sense));
         if (size != 56) return $"SCSI_PASS_THROUGH_DIRECT is {size} bytes, expected 56 (x64 build required).";
         if (senseOff != 56) return $"Sense offset is {senseOff}, expected 56.";
+        int ataSize = Marshal.SizeOf<Native.ATA_PASS_THROUGH_DIRECT>();
+        if (ataSize != 48) return $"ATA_PASS_THROUGH_DIRECT is {ataSize} bytes, expected 48 (x64 build required).";
         return null;
+    }
+
+    /// <summary>
+    /// Issue one <b>raw ATA</b> command via <c>IOCTL_ATA_PASS_THROUGH_DIRECT</c> (the non-packet, task-file
+    /// channel that a PortIO/DOS flasher uses), as opposed to the ATAPI/SCSI packets of
+    /// <see cref="SendCommand"/>. <paramref name="taskFile"/> is the 8-byte ATA control block (see
+    /// <see cref="Native.ATA_PASS_THROUGH_DIRECT"/>). Read-only callers pass <paramref name="dataIn"/>=true.
+    /// This is exploratory: many storage drivers refuse raw (non-packet) ATA commands to an ATAPI optical
+    /// device, in which case <see cref="AtaResult.IoOk"/> is false with a Win32 error.
+    /// </summary>
+    public AtaResult SendAta(byte[] taskFile, bool dataIn, byte[]? data, int timeoutSec = 10, string? note = null)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (taskFile.Length != 8) throw new ArgumentException("ATA task file must be 8 bytes.", nameof(taskFile));
+
+        byte[] dataBuf = data ?? Array.Empty<byte>();
+        ushort flags = dataBuf.Length == 0
+            ? (ushort)0
+            : (ushort)(dataIn ? Native.ATA_FLAGS_DATA_IN : Native.ATA_FLAGS_DATA_OUT);
+
+        var apt = new Native.ATA_PASS_THROUGH_DIRECT
+        {
+            Length = (ushort)Marshal.SizeOf<Native.ATA_PASS_THROUGH_DIRECT>(),
+            AtaFlags = flags,
+            DataTransferLength = (uint)dataBuf.Length,
+            TimeOutValue = (uint)timeoutSec,
+            DataBuffer = IntPtr.Zero,
+            PreviousTaskFile = new byte[8],
+            CurrentTaskFile = (byte[])taskFile.Clone(),
+        };
+
+        GCHandle dataGch = default;
+        IntPtr p = IntPtr.Zero;
+        bool ioOk;
+        int win32 = 0;
+        byte status, error;
+        byte[]? outData = null;
+
+        try
+        {
+            if (dataBuf.Length > 0)
+            {
+                dataGch = GCHandle.Alloc(dataBuf, GCHandleType.Pinned);
+                apt.DataBuffer = dataGch.AddrOfPinnedObject();
+            }
+
+            int size = Marshal.SizeOf<Native.ATA_PASS_THROUGH_DIRECT>();
+            p = Marshal.AllocHGlobal(size);
+            Marshal.StructureToPtr(apt, p, false);
+
+            ioOk = Native.DeviceIoControl(_handle, Native.IOCTL_ATA_PASS_THROUGH_DIRECT,
+                p, (uint)size, p, (uint)size, out _, IntPtr.Zero);
+            if (!ioOk) win32 = Marshal.GetLastWin32Error();
+
+            var outApt = Marshal.PtrToStructure<Native.ATA_PASS_THROUGH_DIRECT>(p);
+            error = outApt.CurrentTaskFile is { Length: 8 } tf ? tf[0] : (byte)0;   // Error register on return
+            status = outApt.CurrentTaskFile is { Length: 8 } tf2 ? tf2[6] : (byte)0; // Status register on return
+            if (dataIn && dataBuf.Length > 0) outData = dataBuf;
+        }
+        finally
+        {
+            if (p != IntPtr.Zero) Marshal.FreeHGlobal(p);
+            if (dataGch.IsAllocated) dataGch.Free();
+        }
+
+        _logger.Info($"ATA cmd=0x{taskFile[6]:X2} → ioOk={ioOk} status=0x{status:X2} error=0x{error:X2}" +
+                     (win32 != 0 ? $" win32={win32}" : "") + (note is null ? "" : $" [{note}]"));
+        return new AtaResult(ioOk, win32, status, error, outData);
     }
 
     public void Dispose()
@@ -160,4 +231,10 @@ public sealed class ScsiDevice : IDisposable
         if (_handle != Native.INVALID_HANDLE_VALUE && _handle != IntPtr.Zero)
             Native.CloseHandle(_handle);
     }
+}
+
+/// <summary>Outcome of a raw ATA pass-through command. <see cref="IoOk"/> false ⇒ the driver refused it.</summary>
+public sealed record AtaResult(bool IoOk, int Win32Error, byte Status, byte Error, byte[]? Data)
+{
+    public bool DriveError => (Status & 0x01) != 0;   // ATA STATUS bit 0 = ERR
 }

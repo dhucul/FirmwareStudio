@@ -40,7 +40,10 @@ public partial class MainWindow : Window
         {
             new MethodChoice("Auto (recommended)", null),
             new MethodChoice("Universal READ BUFFER probe", "universal"),
+            new MethodChoice("MediaTek/Lite-On flash read (READ BUFFER 0x3C mode 6)", "mtk-flash"),
             new MethodChoice("MediaTek internal cache read (0xF1)", "mediatek"),
+            new MethodChoice("PLDS/Lite-On vendor read (0xDF)", "plds"),
+            new MethodChoice("NEC/Renesas RAM read (0xCC, binflash)", "nec"),
             new MethodChoice("UHD Blu-ray service mode (experimental)", "uhd-svc"),
         };
         MethodCombo.SelectedIndex = 0;

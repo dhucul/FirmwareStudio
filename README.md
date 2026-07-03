@@ -13,11 +13,24 @@ There is **no universal "read the firmware flash" SCSI command.** What you can e
 on the drive's chipset, and many drives expose nothing useful over software:
 
 - **INQUIRY** gives only the firmware *revision string*, never the image.
-- **READ BUFFER (0x3C)** exposes controller buffers on *some* drives — often nothing.
+- **READ BUFFER (0x3C)** in the plain "data" mode (mode 2) exposes only the controller's scratch buffer — often
+  nothing. In **mode 6** (download-microcode-with-offsets) it instead addresses the firmware **flash** on
+  MediaTek/Lite-On drives — the same region the official firmware updater reads — which is the strongest
+  software route to a real firmware image on Lite-On iHAS/iHBS drives. Still read-only: `0x3C` is data-in.
 - **MediaTek "read cache" (0xF1)** reads the controller's internal DRAM buffer. On many MediaTek drives
   this is the **disc-data cache**, which reads back empty when idle with no media — it is *not* the
   firmware ROM. On some generations it may contain resident firmware code. Either way it is never a
   guaranteed byte-exact ROM.
+- **Renesas/NEC drives** (NEC ND-*, Optiarc AD-*, and NEC-based Lite-On iHAS revisions) expose their flash
+  through the vendor commands **`0xCC` ReadRAM / `0xCD` ReadBoot** with no unlock — the binflash approach,
+  which this tool ports. This is the reliable software route for that whole family.
+- **MediaTek MT18xx Lite-On drives** (e.g. older iHAS revisions, the Xbox-360 Lite-On drives) gate firmware
+  behind a controller **"Vendor Mode"** (status `0x70`) entered via a **timed physical power-cycle** plus
+  **PortIO / raw ATA register** access (a kernel driver, often on VIA-6421-class hardware — normal AHCI
+  freezes). FirmwareStudio can drive raw ATA where the OS allows it (`IOCTL_ATA_PASS_THROUGH_DIRECT`, see
+  the smoke's *ATA pass-through* line), but many optical drives' drivers **refuse raw ATA** entirely
+  (`ERROR_NOT_SUPPORTED`), and the vendor-mode dance can't be reproduced by a clean pass-through tool anyway.
+  For these drives use MtkWinFlash / JungleFlasher / DosFlash (they ship the PortIO driver), or a programmer.
 - **UHD Blu-ray drives** expose firmware via a service ("svc") mode on specific supported models
   (LibreDrive/MakeMKV territory). Detect-only in v1.
 
@@ -30,8 +43,11 @@ FirmwareStudio surfaces this instead of pretending otherwise, and labels every d
 
 | Method | Command | Applies to | Notes |
 |--------|---------|-----------|-------|
-| Universal READ BUFFER probe | `0x3C` | any drive | Always safe. Reads whatever the controller exposes. |
-| MediaTek internal cache read | `0xF1` | MediaTek chipsets | Reads controller DRAM (firmware code and/or disc cache; may be empty). |
+| Universal READ BUFFER probe | `0x3C` mode 2 | any drive | Always safe. Reads whatever the controller's scratch buffer exposes. |
+| **MediaTek/Lite-On flash read** | `0x3C` mode 6 | MediaTek (Lite-On iHAS/iHBS) | Reads the firmware **flash** via the download-microcode-with-offsets addressing the official Lite-On/MediaTek updater uses (same read redumper's MT1959 flasher issues). The best software path for a real firmware image. Read-only — `0x3C` is data-in; the write/save microcode modes are `0x3B` WRITE BUFFER, never issued. |
+| MediaTek internal cache read | `0xF1` | MediaTek chipsets | Reads controller DRAM disc-cache (may hold firmware code; often empty when idle). |
+| PLDS/Lite-On vendor read | `0xDF` | PLDS/Plextor/Lite-On | The Plextor/PLDS updater's vendor command; walks drive-state/RAM buffers. |
+| **NEC/Renesas RAM read** | `0xCC` / `0xCD` | Renesas/NEC (NEC ND-*, Optiarc AD-*, NEC-based Lite-On iHAS) | Ported from **binflash**. Identifies the drive from its firmware signatures, then dumps the model's flash range(s) — no unlock needed. Read-only: only the data-in `ReadRAM`/`ReadBoot` opcodes, never the `0xCC` erase/safe-mode sub-modes or `0xCB` WriteRAM. Some newer drives gate the full flash behind a "safe mode" state change this tool does not issue; those dump partially and are labelled as such. |
 | UHD Blu-ray service mode | — | supported UHD models | Detection only in v1. |
 
 **Hardware (SPI flash) — the "Hardware" tab:** reads the drive's flash chip *directly*, bypassing the
@@ -53,7 +69,7 @@ adapter. This path requires the physical adapter, so it is untested in CI; it de
 src/FirmwareStudio.Core   — logic + SCSI interop (net10.0, x64)
   Scsi/        Native.cs, ScsiDevice.cs, ScsiCommand.cs, SenseData.cs, ScsiResult.cs
   Drives/      DriveEnumerator.cs, DriveIdentifier.cs, ChipsetDetector.cs
-  Extraction/  IFirmwareExtractionMethod + 3 methods, ExtractionOrchestrator, DumpWriter
+  Extraction/  IFirmwareExtractionMethod + 6 methods (incl. NecRenesasReadMethod + NecDriveTable), ExtractionOrchestrator, DumpWriter
   Models/      DriveIdentity, ChipsetInfo, ExtractionResult, …
   Logging/     IScsiLogger, CommandLogEntry, FileAndMemoryLogger
 src/FirmwareStudio.Wpf    — GUI (net10.0-windows, WinExe, requires admin)
