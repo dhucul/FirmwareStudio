@@ -45,7 +45,7 @@ FirmwareStudio surfaces this instead of pretending otherwise, and labels every d
 |--------|---------|-----------|-------|
 | Universal READ BUFFER probe | `0x3C` mode 2 | any drive | Always safe. Reads whatever the controller's scratch buffer exposes. |
 | **MediaTek/Lite-On flash read** | `0x3C` mode 6 | MediaTek (Lite-On iHAS/iHBS) | Reads the firmware **flash** via the download-microcode-with-offsets addressing the official Lite-On/MediaTek updater uses (same read redumper's MT1959 flasher issues). The best software path for a real firmware image. Read-only — `0x3C` is data-in; the write/save microcode modes are `0x3B` WRITE BUFFER, never issued. |
-| MediaTek internal cache read | `0xF1` | MediaTek chipsets | Reads controller DRAM disc-cache (may hold firmware code; often empty when idle). |
+| MediaTek internal cache read | `0xF1` | MediaTek chipsets | Reads controller DRAM disc-cache (may hold firmware code; often empty when idle). Auto-**de-mirrors**: the controller aliases a small unique region (e.g. ~1 MiB) across the whole address window, so the read stops once the repeat is detected and keeps only the unique copy instead of an 8× mirror. |
 | PLDS/Lite-On vendor read | `0xDF` | PLDS/Plextor/Lite-On | The Plextor/PLDS updater's vendor command; walks drive-state/RAM buffers. |
 | **NEC/Renesas RAM read** | `0xCC` / `0xCD` | Renesas/NEC (NEC ND-*, Optiarc AD-*, NEC-based Lite-On iHAS) | Ported from **binflash**. Identifies the drive from its firmware signatures, then dumps the model's flash range(s) — no unlock needed. Read-only: only the data-in `ReadRAM`/`ReadBoot` opcodes, never the `0xCC` erase/safe-mode sub-modes or `0xCB` WriteRAM. Some newer drives gate the full flash behind a "safe mode" state change this tool does not issue; those dump partially and are labelled as such. |
 | UHD Blu-ray service mode | — | supported UHD models | Detection only in v1. |
@@ -63,6 +63,30 @@ warning:** the flash is 3.3 V; many CH341A clones output 5 V and can destroy the
 adapter. This path requires the physical adapter, so it is untested in CI; it degrades gracefully (a clear
 "install the driver / no adapter" message) when no adapter is present.
 
+## Firmware update-image analysis (`.1KN` / `.1JN`)
+
+The vendor's own **firmware update file** (the payload the official updater extracts from its
+password-protected ZIP and flashes) *is* the byte-exact flashable ROM. FirmwareStudio can open and
+characterise one without any drive — **"Analyze firmware file…"** on the Optical-drive tab, or headless:
+
+```
+dotnet run --project tools/FirmwareStudio.Smoke -- fwfile <image.1KN>
+```
+
+`FirmwareImage.Parse` reads the PLDS/Lite-On **VPD wrapper** at the exact offsets the vendor updater uses
+(magic @0, `VPD_update_file` @0x400, model @0x414, build-date @0xE25A4, version @end−4), then classifies the
+image into regions by Shannon entropy (header / encrypted body / config-tables / padding), extracts strings,
+and — for the high-entropy body — detects an **ECB-mode block cipher** from repeated 16-byte ciphertext
+blocks. It labels the result honestly: on the Plextor PX-891SAF PLUS (MediaTek MT62SA) the ~700 KB body is
+ECB-encrypted with the **key resident in the controller** — the PC updater flashes it verbatim and the drive
+decrypts internally, so this is *not* a plaintext ROM, and there is no PC-side decryptor to make it one.
+
+> **Why there's no software "read the ROM back" for this drive:** decompiling the official
+> `891SAFPLUSPCDriveUpdater` confirms it issues **no full-flash read** — every read is ≤12 bytes of
+> drive-state/status (`0xDF` bufferId `0x0F`/`0x51`, a mode-78 counter, and 4-byte `0x3C` status polls during
+> flashing). A byte-exact on-drive dump would need a read command the firmware doesn't expose, or hardware
+> SoC access. The `0xF1` cache read still surfaces *decrypted-but-sparse* firmware as loaded in RAM.
+
 ## Project layout
 
 ```
@@ -70,6 +94,8 @@ src/FirmwareStudio.Core   — logic + SCSI interop (net10.0, x64)
   Scsi/        Native.cs, ScsiDevice.cs, ScsiCommand.cs, SenseData.cs, ScsiResult.cs
   Drives/      DriveEnumerator.cs, DriveIdentifier.cs, ChipsetDetector.cs
   Extraction/  IFirmwareExtractionMethod + 6 methods (incl. NecRenesasReadMethod + NecDriveTable), ExtractionOrchestrator, DumpWriter
+  Analysis/    DumpAnalyzer.cs (dump region-map + mirror/alias detection + string extraction)
+  Firmware/    FirmwareImage.cs (.1KN/.1JN VPD-wrapper parser + entropy/ECB classification)
   Models/      DriveIdentity, ChipsetInfo, ExtractionResult, …
   Logging/     IScsiLogger, CommandLogEntry, FileAndMemoryLogger
 src/FirmwareStudio.Wpf    — GUI (net10.0-windows, WinExe, requires admin)

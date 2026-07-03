@@ -8,6 +8,7 @@ using System.Windows.Interop;
 using Microsoft.Win32;
 using FirmwareStudio.Core.Drives;
 using FirmwareStudio.Core.Extraction;
+using FirmwareStudio.Core.Firmware;
 using FirmwareStudio.Core.Hardware;
 using FirmwareStudio.Core.Logging;
 using FirmwareStudio.Core.Models;
@@ -243,15 +244,17 @@ public partial class MainWindow : Window
     {
         if (_id is null || _chip is null || DriveCombo.SelectedItem is not OpticalDrive drive) return;
 
-        var method = ResolveMethod();
+        bool isAuto = MethodCombo.SelectedItem is not MethodChoice { Id: { } };
+        var method = isAuto ? null : ResolveMethod();
         _cts = new CancellationTokenSource();
         SetControlsBusy(true);
         CancelButton.IsEnabled = true;
         SaveButton.IsEnabled = false;
         Progress.Value = 0;
         ResultText.Text = "";
-        StageText.Text = $"Extracting via {method.DisplayName}…";
-        AppendLog($"# Extract: {method.DisplayName}");
+        StageText.Text = isAuto ? "Extracting via Auto…" : $"Extracting via {method!.DisplayName}…";
+        AppendLog(isAuto ? "# Extract: Auto (trying methods by priority; keeps the first that returns data)"
+                         : $"# Extract: {method!.DisplayName}");
 
         var progress = new Progress<ExtractionProgress>(p =>
         {
@@ -264,7 +267,9 @@ public partial class MainWindow : Window
         try
         {
             dev = await Task.Run(() => ScsiDevice.Open(drive.Letter, _logger));
-            var result = await _orch.RunAsync(dev, _id, _chip, method, progress, _cts.Token);
+            var result = isAuto
+                ? await _orch.RunAutoAsync(dev, _id, _chip, progress, _cts.Token)
+                : await _orch.RunAsync(dev, _id, _chip, method!, progress, _cts.Token);
             _lastResult = result;
             ShowResult(result);
         }
@@ -336,6 +341,40 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             ShowError($"Save failed: {ex.Message}");
+        }
+    }
+
+    // Open a firmware update image (.1KN/.1JN) or a saved dump and characterise it — no drive required.
+    // This is a read-only file analysis: it never writes to a drive and never flashes anything.
+    private void OnAnalyzeFile(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFileDialog
+        {
+            Filter = "Firmware images (*.1KN;*.1JN;*.bin)|*.1KN;*.1JN;*.bin|All files (*.*)|*.*",
+            Title = "Analyze firmware file",
+        };
+        if (dlg.ShowDialog() != true) return;
+        try
+        {
+            byte[] data = File.ReadAllBytes(dlg.FileName);
+            var info = FirmwareImage.Parse(data);
+
+            StageText.Text = "Firmware file analyzed.";
+            ResultText.Foreground = Palette.TextBrush;
+            string ident = info.Model is null ? "" :
+                $"\nModel: {info.Model}    Version: {info.Version}    Build: {info.DateCode ?? "n/a"}";
+            ResultText.Text = info.Describe() + ident;
+            PreviewHeader.Text = $"File preview — {info.Size:N0} bytes ({Path.GetFileName(dlg.FileName)})";
+            HexBox.Text = HexDump.Format(data);
+            SaveButton.IsEnabled = false;   // a file analysis is not an extraction result to re-save
+
+            AppendLog($"# Analyzed firmware file: {dlg.FileName}");
+            foreach (var r in info.Regions)
+                AppendLog($"#   0x{r.Start:X6}-0x{r.End:X6}  H={r.Entropy:F2}  nz={r.NonZeroPercent:F0}%  {r.Kind}");
+        }
+        catch (Exception ex)
+        {
+            ShowError($"Analyze failed: {ex.Message}");
         }
     }
 

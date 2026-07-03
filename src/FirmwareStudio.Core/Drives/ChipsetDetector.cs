@@ -63,6 +63,10 @@ public static class ChipsetDetector
             }
             else if (probe.DeviceIoOk)
             {
+                // 0xF1 accepted (not illegal-opcode) → the drive implements the MediaTek cache read. This is the
+                // functional signal (e.g. an "Optiarc" AD-5290S+ that accepts 0xF1 is a MediaTek-based drive,
+                // regardless of the vendor string). Auto no longer relies on this label anyway — RunAutoAsync
+                // picks the method that actually returns data — so this just sets an accurate display family.
                 evidence.Add($"MediaTek 0xF1 accepted (status: {probe.StatusText}) → MediaTek cache-read supported.");
                 family = ChipsetFamily.MediaTek;
                 if (name.StartsWith("MediaTek", StringComparison.OrdinalIgnoreCase) == false)

@@ -56,6 +56,15 @@ public sealed class ScsiDevice : IDisposable
 
         byte[] dataBuf = data ?? Array.Empty<byte>();
 
+        // Guardrail: the ATAPI transfer byte-count is 16-bit, so a single data-in read of more than 0xFFFE
+        // bytes truncates in the transport — a request of exactly 0x10000 comes back GOOD with 0 bytes
+        // transferred (empirically verified via the Smoke `sweep`). That silent-zeros failure is exactly what
+        // once made a working cache read look like an "empty drive". Callers must chunk below 0xFFFF; if one
+        // slips through, warn loudly so it is never again mistaken for an unsupported/empty drive.
+        if (dir == ScsiDirection.In && dataBuf.Length > 0xFFFE)
+            _logger.Info($"WARNING: data-in transfer of {dataBuf.Length:N0} bytes exceeds the 16-bit ATAPI " +
+                         "limit (0xFFFE); the drive will likely return 0 bytes. Chunk the read below 0xFFFF.");
+
         var block = new Native.SCSI_PASS_THROUGH_DIRECT_WITH_SENSE
         {
             Sptd = new Native.SCSI_PASS_THROUGH_DIRECT

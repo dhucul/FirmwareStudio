@@ -41,6 +41,38 @@ public sealed class ExtractionOrchestrator
         return ById("universal")!;
     }
 
+    /// <summary>
+    /// Empirical Auto: try methods in firmware-yield priority order and return the FIRST that actually returns
+    /// data. Robust to chipset mislabelling — a MediaTek-based "Optiarc" whose mode-6 flash read is rejected
+    /// simply falls through to the 0xF1 cache read that works, because the choice is by what the drive really
+    /// answers, not by the detected family. Each non-matching method fails fast on its own support probe
+    /// (illegal opcode → Unsupported), so the full read only happens for the method that wins. Priority order
+    /// puts higher-yield firmware reads first (nec/mtk-flash flash → mediatek cache → plds regs → universal).
+    /// </summary>
+    public async Task<ExtractionResult> RunAutoAsync(ScsiDevice device, DriveIdentity id, ChipsetInfo chip,
+        IProgress<ExtractionProgress> progress, CancellationToken ct)
+    {
+        string[] order = { "nec", "mtk-flash", "mediatek", "plds", "universal" };
+        ExtractionResult? last = null;
+        foreach (var mid in order)
+        {
+            var m = ById(mid);
+            if (m is null) continue;
+            ct.ThrowIfCancellationRequested();
+            progress.Report(new ExtractionProgress(0, $"Auto: trying {m.DisplayName}…",
+                $"Auto → {m.DisplayName} ({m.Evaluate(id, chip).Level})"));
+            var res = await RunAsync(device, id, chip, m, progress, ct);
+            if (res.Success && res.ByteCount > 0)
+            {
+                progress.Report(new ExtractionProgress(100, null, $"Auto selected {m.DisplayName}."));
+                return res;
+            }
+            last = res;
+        }
+        return last ?? ExtractionResult.Unsupported("auto", "Auto",
+            "No extraction method returned data on this drive.");
+    }
+
     public async Task<ExtractionResult> RunAsync(ScsiDevice device, DriveIdentity id, ChipsetInfo chip,
         IFirmwareExtractionMethod method, IProgress<ExtractionProgress> progress, CancellationToken ct)
     {

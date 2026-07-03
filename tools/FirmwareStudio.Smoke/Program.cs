@@ -1,8 +1,30 @@
 using FirmwareStudio.Core.Drives;
 using FirmwareStudio.Core.Extraction;
+using FirmwareStudio.Core.Firmware;
 using FirmwareStudio.Core.Logging;
 using FirmwareStudio.Core.Models;
 using FirmwareStudio.Core.Scsi;
+
+// Empirical transfer-size sweep (read-only) — run elevated: `... -- sweep [D]`. Use this to prove whether a
+// "GOOD but 0 bytes" read is a real hardware limit or a malformed request size.
+if (args.Length >= 1 && args[0].Equals("sweep", StringComparison.OrdinalIgnoreCase))
+    return FirmwareStudio.Smoke.Sweep.Run(args.Length >= 2 ? args[1] : null);
+
+// Characterise an existing dump: `... -- analyze <dump.bin>`. Shows what a mostly-zero image really contains.
+if (args.Length >= 1 && args[0].Equals("analyze", StringComparison.OrdinalIgnoreCase))
+    return FirmwareStudio.Smoke.Sweep.Analyze(args.Length >= 2 ? args[1] : null);
+
+// Parse a PLDS/Lite-On firmware update image: `... -- fwfile <image.1KN>`.
+if (args.Length >= 1 && args[0].Equals("fwfile", StringComparison.OrdinalIgnoreCase))
+    return FirmwareStudio.Smoke.Sweep.Firmware(args.Length >= 2 ? args[1] : null);
+
+// Run the real 0xF1 cache extraction (verifies the de-mirror trim on live hardware): `... -- cache [D]`.
+if (args.Length >= 1 && args[0].Equals("cache", StringComparison.OrdinalIgnoreCase))
+    return FirmwareStudio.Smoke.Sweep.CacheRead(args.Length >= 2 ? args[1] : null);
+
+// Run empirical Auto on a drive and report which method actually won: `... -- auto [D]`.
+if (args.Length >= 1 && args[0].Equals("auto", StringComparison.OrdinalIgnoreCase))
+    return FirmwareStudio.Smoke.Sweep.AutoRun(args.Length >= 2 ? args[1] : null);
 
 Console.WriteLine("FirmwareStudio smoke test");
 Console.WriteLine("=========================\n");
@@ -105,6 +127,27 @@ if (layout is not null) return 2;
         ? "[OK]   'nec' extraction method registered in the orchestrator."
         : "[FAIL] 'nec' extraction method not registered.");
     if (!ramOk || !bankIdOk || !bootOk || !tableOk || !registered) return 2;
+}
+
+// 1f. FirmwareImage parser (offline): a synthetic PLDS VPD update image must be recognised and its wrapper
+//     fields (model @0x414, version @end-4 — the exact offsets the 891SAF updater reads) extracted; the
+//     high-entropy body must classify as encrypted; a low-entropy buffer must NOT be flagged as a VPD image.
+{
+    var img = new byte[0x21000];
+    Array.Copy("VPD_update_file"u8.ToArray(), 0, img, 0x400, 15);
+    Array.Copy("PLEXTOR PX-891SAF PLUS  "u8.ToArray(), 0, img, 0x414, 24);
+    Array.Copy("1.KN"u8.ToArray(), 0, img, img.Length - 4, 4);
+    uint s = 0x12345678u;                                  // deterministic high-entropy body at 0x10000+
+    for (int i = 0x10000; i < 0x20000; i++) { s = s * 1664525u + 1013904223u; img[i] = (byte)(s >> 24); }
+    var info = FirmwareImage.Parse(img);
+    bool bodyEnc = info.Regions.Any(r => r.Kind.StartsWith("encrypted", StringComparison.Ordinal));
+    var plain = FirmwareImage.Parse(new byte[0x11000]);   // all-zero: not a VPD image
+    bool ok = info.IsVpdUpdateImage && info.Model == "PLEXTOR PX-891SAF PLUS" && info.Version == "1.KN"
+              && bodyEnc && !plain.IsVpdUpdateImage;
+    Console.WriteLine(ok
+        ? "[OK]   FirmwareImage parser: VPD image recognised, model/version extracted, body classified encrypted, non-VPD rejected"
+        : $"[FAIL] FirmwareImage parser wrong: vpd={info.IsVpdUpdateImage} model='{info.Model}' ver='{info.Version}' bodyEnc={bodyEnc} plainVpd={plain.IsVpdUpdateImage}");
+    if (!ok) return 2;
 }
 
 // 2. Enumerate optical drives (no handle, no elevation needed).
@@ -221,15 +264,17 @@ using (dev)
     // 6. If MediaTek, sample the cache (0xF1) to confirm the money path returns real, non-zero data.
     if (chip.Family == FirmwareStudio.Core.Models.ChipsetFamily.MediaTek)
     {
-        Console.WriteLine("\nMediaTek cache sample (0xF1), 1 x 64 KiB:");
+        Console.WriteLine("\nMediaTek cache sample (0xF1), 256 KiB in 16 KiB reads:");
         long nonZero = 0, totalBytes = 0;
-        for (uint off = 0; off < 1 * 64 * 1024; off += 64 * 1024)
+        for (uint off = 0; off < 0x40000; off += 0x4000)   // 16 KiB chunks — a 0x10000 request truncates to 0 bytes
         {
-            var r = dev.SendCommand(ScsiCommand.MediaTekReadCache(off, 64 * 1024), ScsiDirection.In,
-                new byte[64 * 1024], note: $"MediaTek 0xF1 off={off}");
+            var r = dev.SendCommand(ScsiCommand.MediaTekReadCache(off, 0x4000), ScsiDirection.In,
+                new byte[0x4000], note: $"MediaTek 0xF1 off={off}");
             if (!r.Good || r.Data is null) { Console.WriteLine($"   off {off}: {r.StatusText}"); break; }
-            totalBytes += r.Data.Length;
-            foreach (var b in r.Data) if (b != 0) nonZero++;
+            int got = r.TransferredLength; if (got < 0 || got > 0x4000) got = 0x4000;
+            if (got == 0) { Console.WriteLine($"   off {off}: GOOD but 0 bytes"); break; }
+            totalBytes += got;
+            for (int i = 0; i < got; i++) if (r.Data[i] != 0) nonZero++;
         }
         double pct = totalBytes == 0 ? 0 : 100.0 * nonZero / totalBytes;
         Console.WriteLine($"   read {totalBytes:N0} bytes, {pct:F1}% non-zero " +
@@ -308,13 +353,15 @@ foreach (var d in drives)
         if (f1.Good)
         {
             long nz = 0, tot = 0;
-            for (uint off = 0; off < 0x40000; off += 0x10000)   // 256 KiB sample
+            for (uint off = 0; off < 0x40000; off += 0x4000)   // 256 KiB sample in 16 KiB reads (0x10000 truncates to 0)
             {
-                var s = ndev.SendCommand(ScsiCommand.MediaTekReadCache(off, 0x10000), ScsiDirection.In,
-                    new byte[0x10000], timeoutSec: 8, note: $"0xF1 off=0x{off:X}");
+                var s = ndev.SendCommand(ScsiCommand.MediaTekReadCache(off, 0x4000), ScsiDirection.In,
+                    new byte[0x4000], timeoutSec: 8, note: $"0xF1 off=0x{off:X}");
                 if (!s.Good || s.Data is null) break;
-                tot += s.Data.Length;
-                foreach (byte b in s.Data) if (b != 0x00 && b != 0xFF) nz++;
+                int got = s.TransferredLength; if (got < 0 || got > 0x4000) got = 0x4000;
+                if (got == 0) break;
+                tot += got;
+                for (int i = 0; i < got; i++) { byte b = s.Data[i]; if (b != 0x00 && b != 0xFF) nz++; }
             }
             Console.WriteLine($"      0xF1 sample: {tot:N0} B, {(tot == 0 ? 0 : 100.0 * nz / tot):F1}% firmware-like"
                 + (nz > 0 ? "  → cache holds real data!" : "  → empty/erased."));

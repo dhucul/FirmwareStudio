@@ -11,7 +11,10 @@ namespace FirmwareStudio.Core.Extraction;
 public sealed class UniversalReadBufferMethod : IFirmwareExtractionMethod
 {
     private const int MaxBufferId = 15;
-    private const int ChunkSize = 64 * 1024;
+    // 32 KiB per read. Must stay below 0x10000: the ATAPI transfer byte-count is 16-bit, so a length of
+    // exactly 0x10000 truncates to 0 and the drive returns GOOD with a zero-byte transfer (empirically
+    // verified — see tools/FirmwareStudio.Smoke `sweep`).
+    private const int ChunkSize = 0x8000;
     private const int MaxCapacity = 16 * 1024 * 1024; // guard against absurd reported capacities
 
     public string Id => "universal";
@@ -69,8 +72,19 @@ public sealed class UniversalReadBufferMethod : IFirmwareExtractionMethod
                     $"Read stopped at offset {got:N0} ({read.StatusText}); keeping {got:N0} bytes."));
                 break;
             }
-            Array.Copy(read.Data, 0, outData, got, len);
-            got += len;
+            // Honour the drive-reported transfer length — a GOOD read of 0 bytes is end-of-data, not a chunk
+            // of zeros to append. (The old code copied the full requested length regardless, which quietly
+            // padded the dump with zeros when a request truncated to a 0-byte transfer.)
+            int n = read.TransferredLength;
+            if (n < 0 || n > len) n = len;
+            if (n == 0)
+            {
+                progress.Report(new ExtractionProgress(0, null,
+                    $"Empty read at offset {got:N0}; keeping {got:N0} bytes."));
+                break;
+            }
+            Array.Copy(read.Data, 0, outData, got, n);
+            got += n;
             progress.Report(new ExtractionProgress((int)(100L * got / total)));
         }
 
