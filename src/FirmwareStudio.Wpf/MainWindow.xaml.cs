@@ -1,7 +1,10 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Interop;
 using Microsoft.Win32;
 using FirmwareStudio.Core.Drives;
 using FirmwareStudio.Core.Extraction;
@@ -48,8 +51,48 @@ public partial class MainWindow : Window
         };
         MethodCombo.SelectedIndex = 0;
 
+        // Right-click Copy / Select all / Copy all on every read-only console pane. (Mouse-drag select and
+        // Ctrl+A / Ctrl+C already work on these boxes; this makes copying discoverable and one-click.)
+        AttachCopyMenu(LogBox);
+        AttachCopyMenu(HexBox);
+        AttachCopyMenu(HwLogBox);
+        AttachCopyMenu(HwHexBox);
+
         RefreshDrives();
     }
+
+    private static void AttachCopyMenu(TextBox box)
+    {
+        var menu = new ContextMenu();
+        menu.Items.Add(new MenuItem { Header = "Copy", Command = ApplicationCommands.Copy, CommandTarget = box });
+        menu.Items.Add(new MenuItem { Header = "Select all", Command = ApplicationCommands.SelectAll, CommandTarget = box });
+        menu.Items.Add(new Separator());
+        var copyAll = new MenuItem { Header = "Copy all" };
+        copyAll.Click += (_, _) =>
+        {
+            if (string.IsNullOrEmpty(box.Text)) return;
+            try { Clipboard.SetText(box.Text); } catch { /* clipboard busy — ignore */ }
+        };
+        menu.Items.Add(copyAll);
+        box.ContextMenu = menu;
+    }
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        // Match the Windows title bar to the dark theme (Win11 / late Win10). Cosmetic — ignore failures.
+        try
+        {
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            int on = 1;
+            if (DwmSetWindowAttribute(hwnd, 20, ref on, sizeof(int)) != 0)   // DWMWA_USE_IMMERSIVE_DARK_MODE
+                DwmSetWindowAttribute(hwnd, 19, ref on, sizeof(int));        // older build fallback
+        }
+        catch { /* cosmetic only */ }
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
     private void OnRefresh(object sender, RoutedEventArgs e) => RefreshDrives();
 
@@ -112,26 +155,43 @@ public partial class MainWindow : Window
         foreach (var m in _orch.Methods)
         {
             var a = m.Evaluate(id, chip);
-            var (label, brush) = a.Level switch
+            var (label, fg, bg) = a.Level switch
             {
-                Applicability.Applicable => ("APPLICABLE", Palette.GreenBrush),
-                Applicability.Maybe => ("MAYBE", Palette.PeachBrush),
-                _ => ("N/A", Palette.Overlay1Brush),
+                Applicability.Applicable => ("APPLICABLE", Palette.GreenBrush, Palette.SuccessSoftBrush),
+                Applicability.Maybe => ("MAYBE", Palette.PeachBrush, Palette.WarnSoftBrush),
+                _ => ("N/A", Palette.Overlay1Brush, Palette.Surface1Brush),
             };
-            var header = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 2) };
-            header.Children.Add(new TextBlock
+
+            // Row: a coloured status chip, then the method name (wraps in the remaining width).
+            var header = new Grid { Margin = new Thickness(0, 0, 0, 3) };
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            var chipBadge = new Border
             {
-                Text = label, Foreground = brush, FontWeight = FontWeights.SemiBold, FontSize = 11, Width = 88,
-            });
-            header.Children.Add(new TextBlock
+                Background = bg,
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(7, 1, 7, 2),
+                Margin = new Thickness(0, 1, 8, 0),
+                VerticalAlignment = VerticalAlignment.Top,
+                Child = new TextBlock { Text = label, Foreground = fg, FontWeight = FontWeights.SemiBold, FontSize = 10.5 },
+            };
+            Grid.SetColumn(chipBadge, 0);
+            header.Children.Add(chipBadge);
+
+            var name = new TextBlock
             {
                 Text = m.DisplayName, Foreground = Palette.TextBrush, FontWeight = FontWeights.SemiBold,
-            });
+                TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center,
+            };
+            Grid.SetColumn(name, 1);
+            header.Children.Add(name);
+
             MethodsPanel.Children.Add(header);
             MethodsPanel.Children.Add(new TextBlock
             {
                 Text = a.Reason, Foreground = Palette.Overlay1Brush, FontSize = 11.5,
-                TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8),
+                TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 12),
             });
         }
     }
@@ -268,10 +328,26 @@ public partial class MainWindow : Window
         HwReadButton.IsEnabled = !busy && _hwChip?.SizeKnown == true;
     }
 
-    private void AppendLog(string line)
+    private void AppendLog(string line) => AppendConsole(LogBox, line);
+
+    // Append a line, following the tail only if the view is already at the bottom — so scrolling up to read
+    // or select text isn't yanked away by incoming log lines.
+    private static void AppendConsole(TextBox box, string line)
     {
-        LogBox.AppendText(line + "\n");
-        LogBox.ScrollToEnd();
+        bool atBottom = box.ExtentHeight <= box.ViewportHeight
+                        || box.VerticalOffset >= box.ExtentHeight - box.ViewportHeight - 4;
+        box.AppendText(line + "\n");
+        if (atBottom) box.ScrollToEnd();
+    }
+
+    // Clear buttons wipe only the on-screen panes; the saved .log sidecar (from the logger's own history)
+    // and the last dump held for Save are left intact.
+    private void OnClearLog(object sender, RoutedEventArgs e) => LogBox.Clear();
+
+    private void OnClearPreview(object sender, RoutedEventArgs e)
+    {
+        HexBox.Clear();
+        PreviewHeader.Text = "Dump preview";
     }
 
     // ───────────────────────────── Hardware (SPI flash) tab ─────────────────────────────
@@ -448,8 +524,15 @@ public partial class MainWindow : Window
     private void HwLog(string line)
     {
         _hwLog.Add(line);
-        HwLogBox.AppendText(line + "\n");
-        HwLogBox.ScrollToEnd();
+        AppendConsole(HwLogBox, line);
+    }
+
+    private void OnClearHwLog(object sender, RoutedEventArgs e) => HwLogBox.Clear();
+
+    private void OnClearHwPreview(object sender, RoutedEventArgs e)
+    {
+        HwHexBox.Clear();
+        HwPreviewHeader.Text = "Dump preview";
     }
 
     // Log callback for background SPI work — marshals onto the UI thread.

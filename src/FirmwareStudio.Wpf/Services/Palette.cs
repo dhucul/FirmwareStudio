@@ -83,4 +83,6 @@ public static class Palette
     public static readonly SolidColorBrush RedBrush      = F(Red);
     public static readonly SolidColorBrush MauveBrush    = F(Mauve);
     public static readonly SolidColorBrush SelectionBrush = F(Selection);
+    public static readonly SolidColorBrush SuccessSoftBrush = F(SuccessSoft);
+    public static readonly SolidColorBrush WarnSoftBrush    = F(WarnSoft);
 }
