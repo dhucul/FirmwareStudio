@@ -6,6 +6,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using Microsoft.Win32;
+using FirmwareStudio.Core.Analysis;
 using FirmwareStudio.Core.Drives;
 using FirmwareStudio.Core.Extraction;
 using FirmwareStudio.Core.Firmware;
@@ -357,20 +358,40 @@ public partial class MainWindow : Window
         try
         {
             byte[] data = File.ReadAllBytes(dlg.FileName);
-            var info = FirmwareImage.Parse(data);
-
             StageText.Text = "Firmware file analyzed.";
             ResultText.Foreground = Palette.TextBrush;
-            string ident = info.Model is null ? "" :
-                $"\nModel: {info.Model}    Version: {info.Version}    Build: {info.DateCode ?? "n/a"}";
-            ResultText.Text = info.Describe() + ident;
-            PreviewHeader.Text = $"File preview — {info.Size:N0} bytes ({Path.GetFileName(dlg.FileName)})";
+            PreviewHeader.Text = $"File preview — {data.Length:N0} bytes ({Path.GetFileName(dlg.FileName)})";
             HexBox.Text = HexDump.Format(data);
             SaveButton.IsEnabled = false;   // a file analysis is not an extraction result to re-save
-
             AppendLog($"# Analyzed firmware file: {dlg.FileName}");
-            foreach (var r in info.Regions)
-                AppendLog($"#   0x{r.Start:X6}-0x{r.End:X6}  H={r.Entropy:F2}  nz={r.NonZeroPercent:F0}%  {r.Kind}");
+
+            // Auto-detect: a 0xF1 controller-RAM image vs a .1KN VPD flash image.
+            if (FirmwareFile.Identify(data) == FirmwareFileKind.ControllerRam)
+            {
+                var info = OpticalRamImage.Parse(data);
+                string ident = info.Model is null ? "" :
+                    $"\nVendor: {info.Vendor}    Model: {info.Model}    Firmware: {info.FirmwareRev ?? "n/a"}" +
+                    $"    Build: {info.BuildDate ?? "n/a"}\nSerial: {info.Serial ?? "n/a"}    OEM: {info.Oem ?? "n/a"}";
+                ResultText.Text = info.Describe() + ident;
+
+                if (info.Sections.Count > 0)
+                    AppendLog("#   sections: " + string.Join(", ", info.Sections.Select(s => $"{s.Name}@0x{s.Offset:X}")));
+                if (info.Media.Count > 0)
+                    AppendLog("#   media: " + string.Join(", ", info.Media));
+                if (info.CodeBank is { } cb)
+                    AppendLog($"#   code bank: {cb.Arch} 0x{cb.Offset:X6}-0x{cb.Offset + cb.Length:X6} " +
+                              $"(runtime {(cb.RuntimeDelta < 0 ? "-" : "+")}0x{Math.Abs(cb.RuntimeDelta):X4}, " +
+                              $"{cb.TargetsAligned}/{cb.TargetsTotal} targets aligned)");
+            }
+            else
+            {
+                var info = FirmwareImage.Parse(data);
+                string ident = info.Model is null ? "" :
+                    $"\nModel: {info.Model}    Version: {info.Version}    Build: {info.DateCode ?? "n/a"}";
+                ResultText.Text = info.Describe() + ident;
+                foreach (var r in info.Regions)
+                    AppendLog($"#   0x{r.Start:X6}-0x{r.End:X6}  H={r.Entropy:F2}  nz={r.NonZeroPercent:F0}%  {r.Kind}");
+            }
         }
         catch (Exception ex)
         {

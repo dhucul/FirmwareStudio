@@ -186,8 +186,32 @@ public static class Sweep
         }
 
         byte[] data = File.ReadAllBytes(path);
-        var info = FirmwareImage.Parse(data);
 
+        // Auto-detect: a 0xF1 controller-RAM image vs a .1KN VPD flash image.
+        if (FirmwareFile.Identify(data) == FirmwareFileKind.ControllerRam)
+        {
+            var ram = OpticalRamImage.Parse(data);
+            Console.WriteLine($"Controller-RAM image: {path}\n");
+            Console.WriteLine($"  size      : {ram.Size:N0} bytes");
+            Console.WriteLine($"  vendor    : {ram.Vendor}");
+            Console.WriteLine($"  model     : {ram.Model}");
+            Console.WriteLine($"  firmware  : {ram.FirmwareRev}");
+            Console.WriteLine($"  build     : {ram.BuildDate}");
+            Console.WriteLine($"  serial    : {ram.Serial}");
+            Console.WriteLine($"  OEM       : {ram.Oem}");
+            Console.WriteLine($"\n  {ram.Describe()}\n");
+            Console.WriteLine($"Sections ({ram.Sections.Count}):");
+            foreach (var s in ram.Sections)
+                Console.WriteLine($"   0x{s.Offset:X6}  {s.Name}");
+            Console.WriteLine($"\nMedia write-strategy table ({ram.Media.Count}): {string.Join(", ", ram.Media)}");
+            if (ram.CodeBank is { } cb)
+                Console.WriteLine($"\nCode bank: {cb.Arch} 0x{cb.Offset:X6}-0x{cb.Offset + cb.Length:X6} " +
+                                  $"(density {cb.SignatureDensity:F0}%, runtime {(cb.RuntimeDelta < 0 ? "-" : "+")}0x{Math.Abs(cb.RuntimeDelta):X4}, " +
+                                  $"{cb.TargetsAligned}/{cb.TargetsTotal} call/jump targets aligned)");
+            return 0;
+        }
+
+        var info = FirmwareImage.Parse(data);
         Console.WriteLine($"Firmware image: {path}\n");
         Console.WriteLine($"  size      : {info.Size:N0} bytes");
         Console.WriteLine($"  magic     : {info.Magic}");
