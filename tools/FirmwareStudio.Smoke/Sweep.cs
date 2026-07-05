@@ -205,9 +205,20 @@ public static class Sweep
                 Console.WriteLine($"   0x{s.Offset:X6}  {s.Name}");
             Console.WriteLine($"\nMedia write-strategy table ({ram.Media.Count}): {string.Join(", ", ram.Media)}");
             if (ram.CodeBank is { } cb)
+            {
                 Console.WriteLine($"\nCode bank: {cb.Arch} 0x{cb.Offset:X6}-0x{cb.Offset + cb.Length:X6} " +
                                   $"(density {cb.SignatureDensity:F0}%, runtime {(cb.RuntimeDelta < 0 ? "-" : "+")}0x{Math.Abs(cb.RuntimeDelta):X4}, " +
                                   $"{cb.TargetsAligned}/{cb.TargetsTotal} call/jump targets aligned)");
+
+                // De-bank: build the flat 64 KB 8051 image and sanity-check it (CPU addr for bank offset 0
+                // holds the bank's first byte; the reset vector at 0x0000 should be an LJMP 0x02).
+                byte[] flat = OpticalRamImage.BuildFlat8051Image(data, cb);
+                int cpu0 = cb.RuntimeDelta & 0xFFFF;   // CPU address that holds bank offset 0 (file cb.Offset)
+                string Hex8(int off) => string.Join(" ", flat.Skip(off).Take(8).Select(b => b.ToString("X2")));
+                Console.WriteLine($"\nDe-banked 8051 image: {flat.Length:N0} bytes");
+                Console.WriteLine($"  reset vector @0x0000: {Hex8(0)}  (expect an LJMP, op 02)");
+                Console.WriteLine($"  bank-start   @0x{cpu0:X4}: {Hex8(cpu0)}  == raw @0x{cb.Offset:X6}: {string.Join(" ", data.Skip((int)cb.Offset).Take(8).Select(b => b.ToString("X2")))}");
+            }
             return 0;
         }
 

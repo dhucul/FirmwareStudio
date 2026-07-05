@@ -5,7 +5,7 @@
 ;   "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" installer\FirmwareStudio.iss
 
 #define MyAppName "FirmwareStudio"
-#define MyAppVersion "1.4.0"
+#define MyAppVersion "1.5.0"
 #define MyAppPublisher "David Hucul"
 #define MyAppExe "FirmwareStudio.exe"
 #define MyAppIcon "..\src\FirmwareStudio.Wpf\FirmwareStudio.ico"

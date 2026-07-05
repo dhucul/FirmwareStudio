@@ -118,6 +118,9 @@
                                         <Button x:Name="AnalyzeFileButton" Content="Analyze firmware file…" Style="{StaticResource SubtleButton}"
                                                 Margin="8,0,0,0" HorizontalAlignment="Left" Click="OnAnalyzeFile"
                                                 ToolTip="Open a .1KN/.1JN update image or a saved dump and characterise it (no drive needed)." />
+                                        <Button x:Name="Export8051Button" Content="Export 8051 image…" Style="{StaticResource SubtleButton}"
+                                                Margin="8,0,0,0" HorizontalAlignment="Left" IsEnabled="False" Click="OnExport8051"
+                                                ToolTip="Write a de-banked 64 KB 8051 code image (open in DisasmStudio at base 0). Enabled after analyzing a controller-RAM dump that has an 8051 code bank." />
                                     </StackPanel>
                                 </StackPanel>
                             </Border>

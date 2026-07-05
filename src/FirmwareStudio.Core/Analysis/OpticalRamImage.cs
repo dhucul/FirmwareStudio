@@ -117,6 +117,25 @@ public static class OpticalRamImage
         };
     }
 
+    /// <summary>
+    /// Rebuild a flat 64 KiB 8051 code image from the controller-RAM dump, undoing the controller's bank
+    /// mapping so every CPU code address holds its real byte — ready to open in an 8051 disassembler at
+    /// base 0 (no more zero-padding wall or unresolved cross-bank branches). The dump captures the code
+    /// bank at <see cref="CodeBankInfo.Offset"/> with <c>runtime = fileOffset + RuntimeDelta (mod 0x10000)</c>
+    /// (MT62xx: RuntimeDelta = -0x4000), so CPU address R reads bank offset <c>(R - RuntimeDelta) &amp; 0xFFFF</c>;
+    /// addresses the dump doesn't cover read as zero (the un-captured bank).
+    /// </summary>
+    public static byte[] BuildFlat8051Image(byte[] data, CodeBankInfo bank)
+    {
+        var img = new byte[0x10000];
+        for (int r = 0; r < 0x10000; r++)
+        {
+            long src = bank.Offset + ((r - bank.RuntimeDelta) & 0xFFFF);
+            if (src >= 0 && src < data.Length) img[r] = data[src];
+        }
+        return img;
+    }
+
     /// <summary>Undo a 16-bit word-swap (bytes stored high/low reversed per 16-bit word).</summary>
     public static byte[] Deswap(ReadOnlySpan<byte> src)
     {

@@ -25,6 +25,8 @@ public partial class MainWindow : Window
     private DriveIdentity? _id;
     private ChipsetInfo? _chip;
     private ExtractionResult? _lastResult;
+    private byte[]? _ramData;              // last analyzed controller-RAM dump bytes (for 8051 export)
+    private OpticalRamImageInfo? _ramInfo; // its structured parse (carries the 8051 CodeBankInfo)
     private CancellationTokenSource? _cts;
 
     // Hardware (SPI flash) tab state.
@@ -363,12 +365,15 @@ public partial class MainWindow : Window
             PreviewHeader.Text = $"File preview — {data.Length:N0} bytes ({Path.GetFileName(dlg.FileName)})";
             HexBox.Text = HexDump.Format(data);
             SaveButton.IsEnabled = false;   // a file analysis is not an extraction result to re-save
+            Export8051Button.IsEnabled = false; _ramData = null; _ramInfo = null;
             AppendLog($"# Analyzed firmware file: {dlg.FileName}");
 
             // Auto-detect: a 0xF1 controller-RAM image vs a .1KN VPD flash image.
             if (FirmwareFile.Identify(data) == FirmwareFileKind.ControllerRam)
             {
                 var info = OpticalRamImage.Parse(data);
+                _ramData = data; _ramInfo = info;
+                Export8051Button.IsEnabled = info.CodeBank is not null;
                 string ident = info.Model is null ? "" :
                     $"\nVendor: {info.Vendor}    Model: {info.Model}    Firmware: {info.FirmwareRev ?? "n/a"}" +
                     $"    Build: {info.BuildDate ?? "n/a"}\nSerial: {info.Serial ?? "n/a"}    OEM: {info.Oem ?? "n/a"}";
@@ -396,6 +401,42 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             ShowError($"Analyze failed: {ex.Message}");
+        }
+    }
+
+    // Write a de-banked 64 KB 8051 code image from the analyzed controller-RAM dump — ready to open in an
+    // 8051 disassembler at base 0 (undoes the controller's bank mapping; no drive access, read-only).
+    private void OnExport8051(object sender, RoutedEventArgs e)
+    {
+        if (_ramData is null || _ramInfo?.CodeBank is not { } bank)
+        {
+            MessageBox.Show(this, "Analyze a controller-RAM dump that has an 8051 code bank first.",
+                "Export 8051", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        string baseName = (_ramInfo.Model ?? "firmware").Replace(' ', '_').Replace("+", "").Replace('/', '_');
+        var dlg = new SaveFileDialog
+        {
+            Title = "Export de-banked 8051 image",
+            Filter = "8051 code image (*.bin)|*.bin|All files (*.*)|*.*",
+            FileName = $"{baseName}_8051_64k.bin",
+        };
+        if (dlg.ShowDialog() != true) return;
+        try
+        {
+            byte[] img = OpticalRamImage.BuildFlat8051Image(_ramData, bank);
+            File.WriteAllBytes(dlg.FileName, img);
+            StageText.Text = "De-banked 8051 image exported.";
+            AppendLog($"# Exported de-banked 8051 image: {dlg.FileName} ({img.Length:N0} bytes, " +
+                      $"runtime {(bank.RuntimeDelta < 0 ? "-" : "+")}0x{Math.Abs(bank.RuntimeDelta):X4})");
+            MessageBox.Show(this,
+                $"Wrote a {img.Length:N0}-byte 8051 image:\n{dlg.FileName}\n\n" +
+                "Open it in DisasmStudio: Open as raw → \"8051 / MCS-51 (8-bit)\" → base 0, entry 0.",
+                "Export 8051", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            ShowError($"8051 export failed: {ex.Message}");
         }
     }
 
