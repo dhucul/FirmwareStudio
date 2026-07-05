@@ -440,14 +440,21 @@ public partial class MainWindow : Window
         if (dlg.ShowDialog() != true) return;
         try
         {
-            byte[] img = OpticalRamImage.BuildFlat8051Image(_ramData, bank);
+            byte[] img = OpticalRamImage.BuildFlat8051ImageWithData(_ramData, bank, out long dataVa);
             File.WriteAllBytes(dlg.FileName, img);
+            string dataNote = dataVa >= 0
+                ? $" + VPD/param strings appended at 0x{dataVa:X} (identity, EXTRAINQ, KEYPARA, MEDIA TYPE LOG…)"
+                : "";
             StageText.Text = "De-banked 8051 image exported.";
-            AppendLog($"# Exported de-banked 8051 image: {dlg.FileName} ({img.Length:N0} bytes, " +
-                      $"runtime {(bank.RuntimeDelta < 0 ? "-" : "+")}0x{Math.Abs(bank.RuntimeDelta):X4})");
+            AppendLog($"# Exported 8051 image: {dlg.FileName} ({img.Length:N0} bytes, " +
+                      $"runtime {(bank.RuntimeDelta < 0 ? "-" : "+")}0x{Math.Abs(bank.RuntimeDelta):X4}){dataNote}");
             MessageBox.Show(this,
                 $"Wrote a {img.Length:N0}-byte 8051 image:\n{dlg.FileName}\n\n" +
-                "Open it in DisasmStudio: Open as raw → \"8051 / MCS-51 (8-bit)\" → base 0, entry 0.",
+                "Open it in DisasmStudio: Open as raw → \"8051 / MCS-51 (8-bit)\" → base 0, entry 0.\n\n" +
+                (dataVa >= 0
+                    ? $"Code disassembles at 0x0000–0xFFFF; the VPD/parameter strings (identity, EXTRAINQ, " +
+                      $"KEYPARA, MEDIA TYPE LOG, media tables) are appended as data from 0x{dataVa:X} onward."
+                    : "Contains the de-banked 8051 code space."),
                 "Export 8051", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex)

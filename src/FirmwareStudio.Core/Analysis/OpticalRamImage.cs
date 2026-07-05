@@ -136,6 +136,45 @@ public static class OpticalRamImage
         return img;
     }
 
+    /// <summary>
+    /// Like <see cref="BuildFlat8051Image"/> but also appends the VPD/parameter/string region that sits
+    /// just below the code bank (identity, EXTRAINQ, KEYPARA, MEDIA TYPE LOG, media tables…) after the
+    /// 64 KiB code space, so one file opened in an 8051 disassembler at base 0 shows the disassembled code
+    /// (0x0000–0xFFFF) AND those data strings (from <paramref name="dataRegionVa"/> = 0x10000 onward). If no
+    /// such data region is found, returns the plain 64 KiB image and sets <paramref name="dataRegionVa"/> = -1.
+    /// </summary>
+    public static byte[] BuildFlat8051ImageWithData(byte[] data, CodeBankInfo bank, out long dataRegionVa)
+    {
+        byte[] code = BuildFlat8051Image(data, bank);
+        int start = FindDataRegionStart(data, bank.Offset);
+        int len = (int)bank.Offset - start;
+        if (start < 0 || len <= 0)
+        {
+            dataRegionVa = -1;
+            return code;
+        }
+        var combined = new byte[code.Length + len];
+        Array.Copy(code, combined, code.Length);
+        Array.Copy(data, start, combined, code.Length, len);
+        dataRegionVa = code.Length;   // 0x10000
+        return combined;
+    }
+
+    /// <summary>Start of the contiguous data block that precedes the code bank — i.e. the byte just after
+    /// the largest zero gap below <paramref name="bankOffset"/> (the leading padding). Returns 0 if there is
+    /// no substantial gap (data runs from the top of the file).</summary>
+    private static int FindDataRegionStart(byte[] data, long bankOffset)
+    {
+        int end = (int)Math.Min(bankOffset, data.Length);
+        int start = 0, zeros = 0, maxZeros = 0;
+        for (int p = 0; p < end; p++)
+        {
+            if (data[p] == 0) zeros++;
+            else { if (zeros > maxZeros) { maxZeros = zeros; start = p; } zeros = 0; }
+        }
+        return maxZeros >= 0x1000 ? start : 0;   // require a real gap; else the block starts at the top
+    }
+
     /// <summary>Undo a 16-bit word-swap (bytes stored high/low reversed per 16-bit word).</summary>
     public static byte[] Deswap(ReadOnlySpan<byte> src)
     {
