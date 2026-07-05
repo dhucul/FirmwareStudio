@@ -414,7 +414,9 @@ public partial class MainWindow : Window
                 "Export 8051", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        string baseName = (_ramInfo.Model ?? "firmware").Replace(' ', '_').Replace("+", "").Replace('/', '_');
+        string baseName = _ramInfo.Model ?? "firmware";
+        foreach (char c in Path.GetInvalidFileNameChars()) baseName = baseName.Replace(c, '_');
+        baseName = baseName.Replace(' ', '_').Replace("+", "");
         var dlg = new SaveFileDialog
         {
             Title = "Export de-banked 8051 image",
