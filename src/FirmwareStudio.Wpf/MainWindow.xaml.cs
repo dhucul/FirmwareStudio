@@ -297,6 +297,7 @@ public partial class MainWindow : Window
 
     private void ShowResult(ExtractionResult result)
     {
+        Export8051Button.IsEnabled = false; _ramData = null; _ramInfo = null;   // reset; re-enabled below for a RAM dump
         if (result.Success && result.Firmware is not null)
         {
             Progress.Value = 100;
@@ -306,6 +307,19 @@ public partial class MainWindow : Window
             PreviewHeader.Text = $"Dump preview — {result.ByteCount:N0} bytes ({result.DataLabel})";
             HexBox.Text = HexDump.Format(result.Firmware);
             SaveButton.IsEnabled = result.ByteCount > 0;
+
+            // If this is a 0xF1 controller-RAM dump with an 8051 code bank, offer the de-bank export right
+            // here — no need to save the raw dump and re-open it via "Analyze firmware file…".
+            if (result.ByteCount > 0 && OpticalRamImage.Looks(result.Firmware))
+            {
+                var info = OpticalRamImage.Parse(result.Firmware);
+                if (info.CodeBank is not null)
+                {
+                    _ramData = result.Firmware;
+                    _ramInfo = info;
+                    Export8051Button.IsEnabled = true;
+                }
+            }
         }
         else
         {
