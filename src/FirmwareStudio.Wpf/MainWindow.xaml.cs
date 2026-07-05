@@ -447,14 +447,20 @@ public partial class MainWindow : Window
             // 2) The VPD/parameter/string region as a SEPARATE file next to it (identity, EXTRAINQ, KEYPARA,
             //    MEDIA TYPE LOG, media tables) — that data isn't in the 8051 code space, so it gets its own file.
             byte[]? vpd = OpticalRamImage.ExtractDataRegion(_ramData, bank, out int vpdOff);
-            string? vpdPath = null;
+            string? vpdPath = null, vpdError = null;
             if (vpd is not null)
             {
-                string dir = Path.GetDirectoryName(dlg.FileName) ?? "";
-                string stem = Path.GetFileNameWithoutExtension(dlg.FileName);
-                if (stem.EndsWith("_8051_64k", StringComparison.OrdinalIgnoreCase)) stem = stem[..^"_8051_64k".Length];
-                vpdPath = Path.Combine(dir, stem + "_vpd.bin");
-                File.WriteAllBytes(vpdPath, vpd);
+                // Best-effort sidecar: a VPD write failure must not report the (already-written) code image
+                // as a failed export.
+                try
+                {
+                    string dir = Path.GetDirectoryName(dlg.FileName) ?? "";
+                    string stem = Path.GetFileNameWithoutExtension(dlg.FileName);
+                    if (stem.EndsWith("_8051_64k", StringComparison.OrdinalIgnoreCase)) stem = stem[..^"_8051_64k".Length];
+                    vpdPath = Path.Combine(dir, stem + "_vpd.bin");
+                    File.WriteAllBytes(vpdPath, vpd);
+                }
+                catch (Exception vex) { vpdError = vex.Message; vpdPath = null; }
             }
 
             StageText.Text = "8051 code image exported.";
@@ -462,6 +468,8 @@ public partial class MainWindow : Window
                       $"runtime {(bank.RuntimeDelta < 0 ? "-" : "+")}0x{Math.Abs(bank.RuntimeDelta):X4})");
             if (vpdPath is not null)
                 AppendLog($"# Exported VPD/param region: {vpdPath} ({vpd!.Length:N0} bytes, from dump 0x{vpdOff:X6})");
+            else if (vpdError is not null)
+                AppendLog($"# VPD/param sidecar not written: {vpdError}");
             MessageBox.Show(this,
                 $"Wrote the de-banked 8051 code image ({code.Length:N0} bytes):\n{dlg.FileName}\n" +
                 "  → Open in DisasmStudio: Open as raw → \"8051 / MCS-51 (8-bit)\" → base 0, entry 0.\n\n" +
@@ -469,7 +477,9 @@ public partial class MainWindow : Window
                     ? $"Also wrote the VPD/parameter data ({vpd!.Length:N0} bytes) as a separate file:\n{vpdPath}\n" +
                       $"  → identity / EXTRAINQ / KEYPARA / MEDIA TYPE LOG / media tables (source offset 0x{vpdOff:X6}); " +
                       "open it in a hex/strings viewer when you want that reference — it's data, not 8051 code."
-                    : "No separate VPD region was found."),
+                    : vpdError is not null
+                        ? $"(The code image is fine; the VPD sidecar couldn't be written: {vpdError})"
+                        : "No separate VPD region was found."),
                 "Export 8051", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex)
