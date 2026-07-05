@@ -137,27 +137,20 @@ public static class OpticalRamImage
     }
 
     /// <summary>
-    /// Like <see cref="BuildFlat8051Image"/> but also appends the VPD/parameter/string region that sits
-    /// just below the code bank (identity, EXTRAINQ, KEYPARA, MEDIA TYPE LOG, media tables…) after the
-    /// 64 KiB code space, so one file opened in an 8051 disassembler at base 0 shows the disassembled code
-    /// (0x0000–0xFFFF) AND those data strings (from <paramref name="dataRegionVa"/> = 0x10000 onward). If no
-    /// such data region is found, returns the plain 64 KiB image and sets <paramref name="dataRegionVa"/> = -1.
+    /// Extract the VPD/parameter/string region that sits just below the code bank (identity, EXTRAINQ,
+    /// KEYPARA, MEDIA TYPE LOG, media tables…) as its own byte block — the data a code-only 8051 image
+    /// doesn't contain, since it isn't in the 8051 code address space. Returns null if none is found;
+    /// <paramref name="fileOffset"/> receives the block's offset in the source dump.
     /// </summary>
-    public static byte[] BuildFlat8051ImageWithData(byte[] data, CodeBankInfo bank, out long dataRegionVa)
+    public static byte[]? ExtractDataRegion(byte[] data, CodeBankInfo bank, out int fileOffset)
     {
-        byte[] code = BuildFlat8051Image(data, bank);
         int start = FindDataRegionStart(data, bank.Offset);
         int len = (int)bank.Offset - start;
-        if (start < 0 || len <= 0)
-        {
-            dataRegionVa = -1;
-            return code;
-        }
-        var combined = new byte[code.Length + len];
-        Array.Copy(code, combined, code.Length);
-        Array.Copy(data, start, combined, code.Length, len);
-        dataRegionVa = code.Length;   // 0x10000
-        return combined;
+        fileOffset = start;
+        if (len <= 0) return null;
+        var vpd = new byte[len];
+        Array.Copy(data, start, vpd, 0, len);
+        return vpd;
     }
 
     /// <summary>Start of the contiguous data block that precedes the code bank — i.e. the byte just after

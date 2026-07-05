@@ -440,21 +440,36 @@ public partial class MainWindow : Window
         if (dlg.ShowDialog() != true) return;
         try
         {
-            byte[] img = OpticalRamImage.BuildFlat8051ImageWithData(_ramData, bank, out long dataVa);
-            File.WriteAllBytes(dlg.FileName, img);
-            string dataNote = dataVa >= 0
-                ? $" + VPD/param strings appended at 0x{dataVa:X} (identity, EXTRAINQ, KEYPARA, MEDIA TYPE LOG…)"
-                : "";
-            StageText.Text = "De-banked 8051 image exported.";
-            AppendLog($"# Exported 8051 image: {dlg.FileName} ({img.Length:N0} bytes, " +
-                      $"runtime {(bank.RuntimeDelta < 0 ? "-" : "+")}0x{Math.Abs(bank.RuntimeDelta):X4}){dataNote}");
+            // 1) The pure de-banked 8051 CODE image (open in DisasmStudio at base 0).
+            byte[] code = OpticalRamImage.BuildFlat8051Image(_ramData, bank);
+            File.WriteAllBytes(dlg.FileName, code);
+
+            // 2) The VPD/parameter/string region as a SEPARATE file next to it (identity, EXTRAINQ, KEYPARA,
+            //    MEDIA TYPE LOG, media tables) — that data isn't in the 8051 code space, so it gets its own file.
+            byte[]? vpd = OpticalRamImage.ExtractDataRegion(_ramData, bank, out int vpdOff);
+            string? vpdPath = null;
+            if (vpd is not null)
+            {
+                string dir = Path.GetDirectoryName(dlg.FileName) ?? "";
+                string stem = Path.GetFileNameWithoutExtension(dlg.FileName);
+                if (stem.EndsWith("_8051_64k", StringComparison.OrdinalIgnoreCase)) stem = stem[..^"_8051_64k".Length];
+                vpdPath = Path.Combine(dir, stem + "_vpd.bin");
+                File.WriteAllBytes(vpdPath, vpd);
+            }
+
+            StageText.Text = "8051 code image exported.";
+            AppendLog($"# Exported 8051 code image: {dlg.FileName} ({code.Length:N0} bytes, " +
+                      $"runtime {(bank.RuntimeDelta < 0 ? "-" : "+")}0x{Math.Abs(bank.RuntimeDelta):X4})");
+            if (vpdPath is not null)
+                AppendLog($"# Exported VPD/param region: {vpdPath} ({vpd!.Length:N0} bytes, from dump 0x{vpdOff:X6})");
             MessageBox.Show(this,
-                $"Wrote a {img.Length:N0}-byte 8051 image:\n{dlg.FileName}\n\n" +
-                "Open it in DisasmStudio: Open as raw → \"8051 / MCS-51 (8-bit)\" → base 0, entry 0.\n\n" +
-                (dataVa >= 0
-                    ? $"Code disassembles at 0x0000–0xFFFF; the VPD/parameter strings (identity, EXTRAINQ, " +
-                      $"KEYPARA, MEDIA TYPE LOG, media tables) are appended as data from 0x{dataVa:X} onward."
-                    : "Contains the de-banked 8051 code space."),
+                $"Wrote the de-banked 8051 code image ({code.Length:N0} bytes):\n{dlg.FileName}\n" +
+                "  → Open in DisasmStudio: Open as raw → \"8051 / MCS-51 (8-bit)\" → base 0, entry 0.\n\n" +
+                (vpdPath is not null
+                    ? $"Also wrote the VPD/parameter data ({vpd!.Length:N0} bytes) as a separate file:\n{vpdPath}\n" +
+                      $"  → identity / EXTRAINQ / KEYPARA / MEDIA TYPE LOG / media tables (source offset 0x{vpdOff:X6}); " +
+                      "open it in a hex/strings viewer when you want that reference — it's data, not 8051 code."
+                    : "No separate VPD region was found."),
                 "Export 8051", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex)
