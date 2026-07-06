@@ -26,6 +26,10 @@ if (args.Length >= 1 && args[0].Equals("cache", StringComparison.OrdinalIgnoreCa
 if (args.Length >= 1 && args[0].Equals("auto", StringComparison.OrdinalIgnoreCase))
     return FirmwareStudio.Smoke.Sweep.AutoRun(args.Length >= 2 ? args[1] : null);
 
+// Full extraction-method diagnostic — try every method and report results: `... -- diagnose [D]`.
+if (args.Length >= 1 && args[0].Equals("diagnose", StringComparison.OrdinalIgnoreCase))
+    return FirmwareStudio.Smoke.Sweep.Diagnose(args.Length >= 2 ? args[1] : null);
+
 Console.WriteLine("FirmwareStudio smoke test");
 Console.WriteLine("=========================\n");
 

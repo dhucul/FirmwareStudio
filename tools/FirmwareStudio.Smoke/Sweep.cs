@@ -252,10 +252,118 @@ public static class Sweep
     }
 
     /// <summary>
+    /// Full diagnostic: try every extraction method against a drive and report precisely which succeeded,
+    /// which were rejected, and why. Run: <c>dotnet run --project tools/FirmwareStudio.Smoke -- diagnose [D]</c> (elevated).
+    /// </summary>
+    public static int Diagnose(string? driveArg)
+    {
+        Console.WriteLine("FirmwareStudio — extraction-method diagnostic (read-only)");
+        Console.WriteLine("=========================================================");
+        Console.WriteLine();
+
+        var drives = DriveEnumerator.Scan();
+        if (drives.Count == 0) { Console.WriteLine("No optical drives found."); return 1; }
+        var target = driveArg is { Length: >= 1 }
+            ? drives.FirstOrDefault(d => char.ToUpperInvariant(d.Letter) == char.ToUpperInvariant(driveArg[0]))
+            : drives[0];
+        if (target is null) { Console.WriteLine($"Drive '{driveArg}' not found."); return 1; }
+
+        var logger = new FileAndMemoryLogger();
+        ScsiDevice dev;
+        try { dev = ScsiDevice.Open(target.Letter, logger); }
+        catch (ScsiOpenException ex) { Console.WriteLine($"Open failed: {ex.Message}\n(Run elevated.)"); return 1; }
+
+        using (dev)
+        {
+            var id = DriveIdentifier.Identify(dev, DriveEnumerator.QueryBusType(target.Letter));
+            var chip = ChipsetDetector.Detect(dev, id);
+            Console.WriteLine($"Drive {target.Letter}: '{id.Vendor}' '{id.Model}' fw='{id.FirmwareRevision}' serial='{id.Serial ?? "(n/a)"}'");
+            Console.WriteLine($"Chipset: {chip.Family} — {chip.Name} ({chip.ConfidencePercent}% confidence)");
+            Console.WriteLine($"Evidence:");
+            foreach (var e in chip.Evidence) Console.WriteLine($"  - {e}");
+            Console.WriteLine();
+
+            var orch = new ExtractionOrchestrator();
+            var allMethods = orch.Methods;
+
+            Console.WriteLine(new string('-', 72));
+            Console.WriteLine($"{"Method",-22} {"Applicable",-10} {"Success",-8} {"Bytes",-12} Result");
+            Console.WriteLine(new string('-', 72));
+
+            foreach (var method in allMethods)
+            {
+                var applicability = method.Evaluate(id, chip);
+                string appl = applicability.Level switch
+                {
+                    Applicability.Applicable => "YES",
+                    Applicability.Maybe => "maybe",
+                    Applicability.NotApplicable => "NO",
+                    _ => "?"
+                };
+                Console.Write($"{method.DisplayName[..Math.Min(21, method.DisplayName.Length)],-22} {appl,-10} ");
+
+                if (applicability.Level == Applicability.NotApplicable)
+                {
+                    Console.WriteLine($"{"skip",-8} {"-",-12} {applicability.Reason}");
+                    continue;
+                }
+
+                try
+                {
+                    var progress = new Progress<ExtractionProgress>(p => { });
+                    var res = method.Extract(dev, id, chip, progress, CancellationToken.None);
+                    string status = res.Success ? "OK" : (res.Reason != null ? "N/A" : "FAIL");
+                    Console.WriteLine($"{status,-8} {res.ByteCount,8:N0} B  {res.Summary.Replace('\n', ' ').Truncate(200)}");
+
+                    if (res.Success)
+                    {
+                        string label = res.DataLabel?.Replace('\n', ' ') ?? "(no label)";
+                        Console.WriteLine($"  → label: {label.Truncate(160)}");
+                    }
+                    else if (res.Reason != null)
+                    {
+                        string reason = res.Reason.Replace('\n', ' ');
+                        Console.WriteLine($"  → reason: {reason.Truncate(160)}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"{"ERROR",-8} {"-",-12} {ex.Message.Truncate(120)}");
+                }
+            }
+
+            Console.WriteLine(new string('-', 72));
+            Console.WriteLine();
+
+            // Now run Auto and show which method wins
+            Console.WriteLine("Empirical Auto result:");
+            try
+            {
+                var progress = new Progress<ExtractionProgress>(p =>
+                {
+                    if (p.LogLine is not null) Console.WriteLine($"  {p.LogLine}");
+                    if (p.Stage is not null) Console.WriteLine($"  [{p.Stage}]");
+                });
+                var autoRes = orch.RunAutoAsync(dev, id, chip, progress, CancellationToken.None).GetAwaiter().GetResult();
+                Console.WriteLine($"  → Selected: {autoRes.MethodId} ({autoRes.MethodName})");
+                Console.WriteLine($"  → Success: {autoRes.Success}  Bytes: {autoRes.ByteCount:N0}");
+                Console.WriteLine($"  → {autoRes.Summary.Replace('\n', ' ').Truncate(300)}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  Auto failed: {ex.Message}");
+            }
+        }
+        return 0;
+    }
+
+    private static string Truncate(this string s, int n) => s.Length <= n ? s : s[..(n - 3)] + "...";
+
+    /// <summary>
     /// Characterise an existing dump file (read-only): what its non-zero bytes actually are — the mirror/alias
     /// period, the non-zero region map, and readable strings (firmware version/build date, media tables).
     /// Turns a "mostly zeros" image into a plain-language account of what was captured.
-    /// Run: <c>dotnet run --project tools/FirmwareStudio.Smoke -- analyze &lt;dump.bin&gt;</c>
+    /// Run: <c>dotnet run --project tools/FirmwareStudio.Smoke -- analyze <dump.bin></c>
     /// </summary>
     public static int Analyze(string? path)
     {

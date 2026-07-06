@@ -116,13 +116,123 @@ public sealed class MediaTekCacheReadMethod : IFirmwareExtractionMethod
         }
 
         int keep = mirrorPeriod > 0 ? mirrorPeriod : written;
-        byte[] data = buf[..keep];
+        byte[] primary = buf[..keep];
 
         if (nonZero == 0)
             return ExtractionResult.Unsupported(Id, DisplayName,
-                $"The MediaTek 0xF1 cache returned {data.Length:N0} bytes but all were zero ({stop}). On this drive the " +
+                $"The MediaTek 0xF1 cache returned {primary.Length:N0} bytes but all were zero ({stop}). On this drive the " +
                 "cache holds disc data (empty with no/blank media), not the firmware ROM. Try again with a data disc " +
                 "inserted to capture the cache, or use the flash-read method (0x3C mode 6) / a hardware programmer for a true dump.");
+
+        // Second pass: if a mirror was detected early, probe at offsets beyond the mirror boundary to
+        // discover additional unique DRAM regions (e.g. separate bank at higher addresses on MT62xx).
+        var additional = new List<(uint Offset, byte[] Data)>();
+        if (mirrorPeriod > 0 && written > mirrorPeriod)
+        {
+            // Probe from the next candidate base above the mirror region, jumping in mirror-sized steps.
+            // The controller may have placed a different region at a non-mirror-aligned offset.
+            long nextCandidate = ((long)(written / mirrorPeriod) + 1) * mirrorPeriod;
+            for (int attempt = 0; attempt < 8 && nextCandidate < MaxSize; attempt++)
+            {
+                long probeOff = nextCandidate + attempt * mirrorPeriod;
+                if (probeOff >= MaxSize) break;
+
+                uint probeOffset = (uint)probeOff;
+                var probe = device.SendCommand(
+                    ScsiCommand.MediaTekReadCache(probeOffset, (uint)ChunkSize), ScsiDirection.In,
+                    new byte[ChunkSize], note: $"MediaTek 0xF1 second-pass probe off={probeOffset}");
+
+                if (!probe.Good || probe.Data is null) break;
+                int got = probe.TransferredLength;
+                if (got < 0 || got > ChunkSize) got = ChunkSize;
+                if (got == 0) break;
+
+                // Check if this region is genuinely new (not a shift of the mirror)
+                long nz = 0;
+                for (int i = 0; i < got; i++) if (probe.Data[i] != 0) nz++;
+                if (nz == 0) continue;
+
+                // Read up to the mirror period from this starting point
+                int regionSize = Math.Min(mirrorPeriod, (int)(MaxSize - probeOffset));
+                var regionBuf = new byte[regionSize];
+                int regionWritten = 0;
+                for (uint roff = 0; roff < regionSize; roff += ChunkSize)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    uint rlen = Math.Min((uint)ChunkSize, (uint)(regionSize - roff));
+                    var rr = device.SendCommand(
+                        ScsiCommand.MediaTekReadCache(probeOffset + roff, rlen), ScsiDirection.In,
+                        new byte[rlen], note: $"MediaTek 0xF1 additional off={probeOffset + roff} len={rlen}");
+                    if (!rr.Good || rr.Data is null) break;
+                    int rgot = rr.TransferredLength;
+                    if (rgot < 0 || rgot > (int)rlen) rgot = (int)rlen;
+                    if (rgot == 0) break;
+                    Array.Copy(rr.Data, 0, regionBuf, regionWritten, rgot);
+                    regionWritten += rgot;
+                    // Stop if data turns to all zeros (end of this region)
+                    bool allZero = true;
+                    for (int i = 0; i < rgot; i++) if (rr.Data[i] != 0) { allZero = false; break; }
+                    if (allZero) break;
+                }
+
+                // Trim trailing zeros
+                int rkeep = regionWritten;
+                while (rkeep > 0 && regionBuf[rkeep - 1] == 0) rkeep--;
+                if (rkeep > 64)   // must have meaningful data (more than just a 64-byte status blob)
+                {
+                    // Verify it's not just another mirror of the primary region
+                    if (!IdenticalToPrimary(primary, keep, regionBuf, rkeep))
+                    {
+                        additional.Add((probeOffset, regionBuf[..rkeep]));
+                        progress.Report(new ExtractionProgress(90 + attempt,
+                            null, $"Second-pass found unique region at 0x{probeOffset:X}: {rkeep} bytes"));
+                    }
+                }
+            }
+        }
+
+        byte[] data;
+        string secondPassNote = "";
+        if (additional.Count > 0)
+        {
+            // Composite assembly: primary region + each additional region with a marker prefix
+            long totalSize = keep + additional.Sum(a => 128L + a.Data.Length);
+            if (totalSize > int.MaxValue - 4096) totalSize = int.MaxValue - 4096;
+            using var ms = new System.IO.MemoryStream((int)totalSize);
+
+            // Leading composite file identifier
+            byte[] fileId = System.Text.Encoding.ASCII.GetBytes(
+                $"FirmwareStudio 0xF1 cache composite dump — {1 + additional.Count} region(s) [v2]\r\n" +
+                $"Created: {DateTime.UtcNow:O}\r\n\r\n");
+            ms.Write(fileId);
+
+            // Write primary region
+            string primaryHdr = $"=== PRIMARY @0x00000000 ===  size={keep}  non-zero={nonZero}".PadRight(127) + "\n";
+            byte[] ph = System.Text.Encoding.ASCII.GetBytes(primaryHdr[..Math.Min(primaryHdr.Length, 128)]);
+            byte[] paddedPh = new byte[128];
+            Array.Copy(ph, paddedPh, Math.Min(ph.Length, 128));
+            ms.Write(paddedPh);
+            ms.Write(primary);
+
+            foreach (var (off, addData) in additional)
+            {
+                long anz = 0;
+                foreach (byte b in addData) if (b != 0) anz++;
+                string hdr = $"=== REGION @0x{off:X8} ===  size={addData.Length}  non-zero={anz}".PadRight(127) + "\n";
+                byte[] h = System.Text.Encoding.ASCII.GetBytes(hdr[..Math.Min(hdr.Length, 128)]);
+                byte[] paddedH = new byte[128];
+                Array.Copy(h, paddedH, Math.Min(h.Length, 128));
+                ms.Write(paddedH);
+                ms.Write(addData);
+            }
+            data = ms.ToArray();
+            secondPassNote = $" Second pass found {additional.Count} additional unique region(s) " +
+                             $"at {string.Join(", ", additional.Select(a => $"0x{a.Offset:X}"))} — composite dump built.";
+        }
+        else
+        {
+            data = primary;
+        }
 
         var analysis = DumpAnalyzer.Analyze(data);
         string mirrorNote = mirrorPeriod > 0
@@ -130,7 +240,7 @@ public sealed class MediaTekCacheReadMethod : IFirmwareExtractionMethod
             : "";
         return ExtractionResult.Ok(Id, DisplayName, data,
             "MediaTek controller cache/RAM image (resident firmware code/config and/or cached disc data)",
-            $"Read {data.Length:N0} bytes from the MediaTek internal cache via opcode 0xF1. {analysis.Verdict()}{mirrorNote}");
+            $"Read {data.Length:N0} bytes from the MediaTek internal cache via opcode 0xF1. {analysis.Verdict()}{mirrorNote}{secondPassNote}");
     }
 
     /// <summary>
@@ -163,5 +273,26 @@ public sealed class MediaTekCacheReadMethod : IFirmwareExtractionMethod
             if (a == b) matches++;
         }
         return considered < count / 64 ? 0 : (double)matches / considered;
+    }
+
+    /// <summary>Returns true if <c>other</c> appears to be a mirror/duplicate of the primary buffer (same
+    /// non-zero content shifted to a different base offset). Uses a simple byte-for-byte comparison of the
+    /// first overlapping block to avoid false-positive "unique" regions.</summary>
+    private static bool IdenticalToPrimary(byte[] primary, int primaryLen, byte[] other, int otherLen)
+    {
+        // Compare the entire overlap: if >50% of non-zero bytes match at corresponding positions,
+        // this is likely a mirror (or an aligned copy) — not truly unique.
+        int cmpLen = Math.Min(primaryLen, otherLen);
+        if (cmpLen < 64) return false;
+        long considered = 0, matches = 0;
+        for (int i = 0; i < cmpLen; i++)
+        {
+            byte a = primary[i], b = other[i];
+            if (a == 0 && b == 0) continue;
+            considered++;
+            if (a == b) matches++;
+        }
+        // If >50% of overlapping non-zero bytes match, treat it as not truly unique
+        return considered > 0 && matches * 2 > considered;
     }
 }
