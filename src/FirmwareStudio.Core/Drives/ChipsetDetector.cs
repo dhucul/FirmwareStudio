@@ -46,20 +46,33 @@ public static class ChipsetDetector
             ? $"No vendor/model table match for \"{id.Vendor} {id.Model}\"."
             : $"Vendor/model table: \"{id.Vendor} {id.Model}\" → {name} ({conf}%).");
 
-        // Confirmation probe: MediaTek read-cache (0xF1) is read-only. An ILLEGAL REQUEST (sense key 0x05 —
-        // invalid opcode OR invalid field) means the drive did not accept the command, so it is NOT a
-        // MediaTek cache-read drive; GOOD / not-ready / any other response confirms the command is understood.
+        // Confirmation probe: MediaTek read-cache (0xF1) is read-only. Only INVALID COMMAND OPERATION CODE
+        // (asc=0x20) means the opcode is genuinely absent → NOT a MediaTek cache-read drive. INVALID FIELD IN
+        // CDB (asc=0x24) means the drive *understood* 0xF1 and only objected to a field, so it IS a MediaTek
+        // drive (as does GOOD / not-ready / any other response). Confirmed on the PX-891SAF, whose MT62xx
+        // controller answers asc=24 to several vendor probes it nonetheless implements.
         try
         {
             var probe = dev.SendCommand(ScsiCommand.MediaTekReadCache(0, 64), ScsiDirection.In,
                 new byte[64], timeoutSec: 10, note: "chipset probe: MediaTek 0xF1 read-cache");
             var s = probe.SenseInfo;
-            bool rejected = probe.DeviceIoOk && probe.ScsiStatus != 0x00 && s.Key == 0x05;
+            bool rejected = probe.DeviceIoOk && s.OpcodeUnsupported;
 
             if (rejected)
             {
-                evidence.Add($"MediaTek 0xF1 rejected (ILLEGAL REQUEST, asc={s.Asc:X2}/{s.Ascq:X2}) → not a MediaTek cache-read drive.");
+                evidence.Add("MediaTek 0xF1 rejected (INVALID COMMAND OPERATION CODE, asc=20) → not a MediaTek cache-read drive.");
                 if (family == ChipsetFamily.MediaTek) { conf = Math.Min(conf, 45); }
+            }
+            else if (probe.DeviceIoOk && s.FieldInvalid)
+            {
+                // asc=24: the drive recognised 0xF1 but rejected a field → it IS a MediaTek controller,
+                // though the cache read itself may need different parameters. Confirm the family, but at
+                // slightly lower confidence than a clean accept, and don't claim the read works.
+                evidence.Add("MediaTek 0xF1 recognised (INVALID FIELD IN CDB, asc=24) → MediaTek controller.");
+                family = ChipsetFamily.MediaTek;
+                if (name.StartsWith("MediaTek", StringComparison.OrdinalIgnoreCase) == false)
+                    name = "MediaTek (confirmed by vendor command)";
+                conf = Math.Max(conf, 85);
             }
             else if (probe.DeviceIoOk)
             {

@@ -12,6 +12,24 @@ public readonly struct SenseData
     /// <summary>True when the sense buffer carried a recognised response code.</summary>
     public bool Present { get; }
 
+    /// <summary>ILLEGAL REQUEST — the drive rejected the command (bad opcode or field).</summary>
+    public bool IllegalRequest => Present && Key == 0x05;
+
+    /// <summary>
+    /// ILLEGAL REQUEST / INVALID COMMAND OPERATION CODE (asc=0x20): the opcode is genuinely
+    /// not implemented by this firmware. This is the only "not supported" verdict.
+    /// </summary>
+    public bool OpcodeUnsupported => IllegalRequest && Asc == 0x20;
+
+    /// <summary>
+    /// ILLEGAL REQUEST / INVALID FIELD IN CDB (asc=0x24): the drive *recognised* the opcode
+    /// and only objected to a field value (mode/bufferId/length/offset) — the command is live,
+    /// so the right response is to retry with corrected fields, not to give up. Confirmed on the
+    /// PLEXTOR PX-891SAF PLUS, whose 0xDF servo/quality sub-commands answer asc=24 when a required
+    /// field (e.g. an LBA) is left zero, versus asc=20 for a truly-absent opcode.
+    /// </summary>
+    public bool FieldInvalid => IllegalRequest && Asc == 0x24;
+
     private SenseData(byte key, byte asc, byte ascq, bool present)
     {
         Key = key; Asc = asc; Ascq = ascq; Present = present;

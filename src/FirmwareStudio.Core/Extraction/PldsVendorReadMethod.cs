@@ -29,11 +29,25 @@ public sealed class PldsVendorReadMethod : IFirmwareExtractionMethod
     private const byte StateBufferId = 0x0F;    // the updater's drive-state register bank
     private const int MaxBufferId = 0x1F;       // sweep 0..31
     private const int ProbeLen = 256;           // per-slot quick probe (smaller = faster discovery)
-    private const int MaxPerSlot = 0x10000;     // 64 KiB per responsive slot (firmware regions are small)
+    // 0xDF carries no length field, so the transfer size = buffer size. Keep it under the 16-bit
+    // ATAPI ceiling (0xFFFE): a 0x10000 (64 KiB) buffer wraps to a 0-byte transfer on real drives
+    // (see ScsiDevice's guardrail), which silently zeroed every deep read.
+    private const int MaxPerSlot = 0xFFFE;
 
     // The three arg3 values the Plextor PX-891SAF updater used for different register banks
     // (observed: 0x20=dstate-1, 0x14=dstate-2, 0x11=counter-latch). Trying all three finds more.
     private static readonly byte[] Arg3Values = { 0x20, 0x14, 0x11, 0x00 };
+
+    // Validated 0xDF sub-command map (byte[1]=function selector — what this method calls "mode").
+    // Reverse-engineered from Vinpower's vpscan/QPxTool plugins and hardware-verified on the
+    // PLEXTOR PX-891SAF PLUS (see repo PX891-QScan). This method deliberately uses ONLY mode 0x00
+    // (register/RAM read) because every other function is a QUALITY-SCAN or SERVO operation — none
+    // read firmware, which is positive evidence that 0xDF exposes no firmware-read path:
+    //   00 <buf>   register/state bank read (used here; buf 0x0F = drive-state)
+    //   82 05/09   CD C1/C2/CU error counters      1B 80   jitter/beta readback
+    //   08 01/02   focus/tracking-error servo      02 09   FE/TE head position
+    //   A0 / A3 01 error-measurement start / stop  97      interval-counter reset
+    // On the PX-891, 82 05/09 and 02 09 return GOOD; 1B/08 answer asc=24 (opcode live, needs an LBA).
 
     /// <summary>A discovered vendor-buffer slot with its data.</summary>
     private sealed record Slot(byte BufferId, byte Arg3, byte[] Data, long NonZero)
@@ -69,15 +83,17 @@ public sealed class PldsVendorReadMethod : IFirmwareExtractionMethod
     {
         progress.Report(new ExtractionProgress(0, "PLDS vendor read (0xDF) — probe phase"));
 
-        // 1. Support probe = the updater's exact 12-byte drive-state read. An ILLEGAL REQUEST (sense key
-        //    0x05) means the drive does not implement 0xDF; anything else means it understood the command.
+        // 1. Support probe = the updater's exact 12-byte drive-state read. Distinguish a genuinely-absent
+        //    opcode (INVALID COMMAND OPERATION CODE, asc=0x20) from a recognised opcode with a wrong field
+        //    (INVALID FIELD IN CDB, asc=0x24). Only asc=0x20 means "not a 0xDF drive"; asc=0x24 means 0xDF
+        //    IS implemented and only this bufferId/arg3 was wrong, so we fall through to the sweep.
         var probe = device.SendCommand(ScsiCommand.PldsVendor(ReadMode, StateBufferId, 0x20, 0x00),
             ScsiDirection.In, new byte[12], note: "PLDS 0xDF drive-state read (probe)");
         var s = probe.SenseInfo;
-        if (probe.DeviceIoOk && probe.ScsiStatus != 0x00 && s.Key == 0x05)
+        if (probe.DeviceIoOk && s.OpcodeUnsupported)
             return ExtractionResult.Unsupported(Id, DisplayName,
-                $"The drive rejected the PLDS 0xDF vendor command (ILLEGAL REQUEST, asc={s.Asc:X2}/{s.Ascq:X2}). " +
-                "It is not a PLDS/Lite-On (MediaTek) vendor-command drive, or this firmware does not expose 0xDF.");
+                "The drive rejected the PLDS 0xDF vendor command (INVALID COMMAND OPERATION CODE, asc=20). " +
+                "It does not implement 0xDF — not a PLDS/Lite-On (MediaTek) vendor-command drive.");
         if (!probe.DeviceIoOk)
             return ExtractionResult.Unsupported(Id, DisplayName,
                 $"Could not issue the 0xDF vendor command ({probe.StatusText}).");

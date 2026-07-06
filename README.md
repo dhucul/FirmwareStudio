@@ -66,7 +66,7 @@ adapter. This path requires the physical adapter, so it is untested in CI; it de
 ## Firmware update-image analysis (`.1KN` / `.1JN`)
 
 The vendor's own **firmware update file** (the payload the official updater extracts from its
-password-protected ZIP and flashes) *is* the byte-exact flashable ROM. FirmwareStudio can open and
+password-protected ZIP — password `Vinpower13059881` — and flashes) *is* the byte-exact flashable ROM. FirmwareStudio can open and
 characterise one without any drive — **"Analyze firmware file…"** on the Optical-drive tab, or headless:
 
 ```
@@ -83,9 +83,14 @@ decrypts internally, so this is *not* a plaintext ROM, and there is no PC-side d
 
 > **Why there's no software "read the ROM back" for this drive:** decompiling the official
 > `891SAFPLUSPCDriveUpdater` confirms it issues **no full-flash read** — every read is ≤12 bytes of
-> drive-state/status (`0xDF` bufferId `0x0F`/`0x51`, a mode-78 counter, and 4-byte `0x3C` status polls during
-> flashing). A byte-exact on-drive dump would need a read command the firmware doesn't expose, or hardware
-> SoC access. The `0xF1` cache read still surfaces *decrypted-but-sparse* firmware as loaded in RAM.
+> drive-state/status via `0xDF` (register banks), plus 4-byte `0x3C` status polls during flashing.
+> Independently, reverse-engineering Vinpower's `vpscan`/QPxTool scanner and hardware-testing the full
+> `0xDF` sub-command surface on the PX-891SAF PLUS shows the command's `byte[1]` is a **function selector**,
+> and *every* function is quality-scan or servo, **none read firmware**: `82`=C1/C2/CU error counters,
+> `1B`=jitter/beta, `08`=focus/tracking-error, `02`=head position, `A0`/`A3`=measurement start/stop,
+> `97`=interval reset, `00`=register/state bank (the only one this tool uses). So `0xDF` genuinely exposes
+> no firmware-read path. A byte-exact on-drive dump would need a read command the firmware doesn't expose, or
+> hardware SoC access. The `0xF1` cache read still surfaces *decrypted-but-sparse* firmware as loaded in RAM.
 
 ## Project layout
 
