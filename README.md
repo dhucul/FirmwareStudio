@@ -92,6 +92,20 @@ decrypts internally, so this is *not* a plaintext ROM, and there is no PC-side d
 > no firmware-read path. A byte-exact on-drive dump would need a read command the firmware doesn't expose, or
 > hardware SoC access. The `0xF1` cache read still surfaces *decrypted-but-sparse* firmware as loaded in RAM.
 
+### Pioneer firmware updaters (`.exe` / `Updater.exe` / `.bin`)
+
+The same **"Analyze firmware file…"** button (and `fwfile`) also inspects **Pioneer** optical-drive
+firmware updaters (BDR-S13 family). Point it at the vendor `.exe` (a WinRAR ZIP-SFX → inner
+`Updater.exe` → custom `BINARY` resources **131** = kernel / **132** = normal), the inner
+`Updater.exe`, or an already-extracted `.bin`. `PioneerFirmwareImage.Parse` reads each image's
+512-byte plaintext header (model / revision / `Kernel`|`Normal` / hardware version / build date /
+part label `S920143{n}.105`) and reports each part's body offset, Shannon entropy, and SHA-256. As
+with the PLDS images the body is decoded **inside the drive** — the updater flashes it verbatim via
+`WRITE BUFFER 0x3B` mode 7, so there is no PC-side decryptor. See
+[docs/pioneer-firmware-update-protocol.md](docs/pioneer-firmware-update-protocol.md) for the full
+packaging + flash-protocol reverse engineering; FirmwareStudio implements only the read-only parsing
+(not the write/flash or kernel-mode-switch paths).
+
 ## Project layout
 
 ```
@@ -100,7 +114,8 @@ src/FirmwareStudio.Core   — logic + SCSI interop (net10.0, x64)
   Drives/      DriveEnumerator.cs, DriveIdentifier.cs, ChipsetDetector.cs
   Extraction/  IFirmwareExtractionMethod + 6 methods (incl. NecRenesasReadMethod + NecDriveTable), ExtractionOrchestrator, DumpWriter
   Analysis/    DumpAnalyzer.cs (dump region-map + mirror/alias detection + string extraction)
-  Firmware/    FirmwareImage.cs (.1KN/.1JN VPD-wrapper parser + entropy/ECB classification)
+  Firmware/    FirmwareImage.cs (.1KN/.1JN VPD-wrapper parser + entropy/ECB classification),
+               PioneerFirmwareImage.cs (Pioneer updater .exe/.bin parser + PE-resource/SFX unwrap)
   Models/      DriveIdentity, ChipsetInfo, ExtractionResult, …
   Logging/     IScsiLogger, CommandLogEntry, FileAndMemoryLogger
 src/FirmwareStudio.Wpf    — GUI (net10.0-windows, WinExe, requires admin)

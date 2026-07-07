@@ -9,6 +9,8 @@ public enum FirmwareFileKind
     VpdImage,
     /// <summary>A MediaTek/PLDS <c>0xF1</c> controller-RAM image (parse with <see cref="OpticalRamImage"/>).</summary>
     ControllerRam,
+    /// <summary>A Pioneer firmware updater (.exe / Updater.exe / raw microcode .bin — parse with <see cref="PioneerFirmwareImage"/>).</summary>
+    PioneerUpdate,
 }
 
 /// <summary>
@@ -20,5 +22,9 @@ public enum FirmwareFileKind
 public static class FirmwareFile
 {
     public static FirmwareFileKind Identify(byte[] data)
-        => OpticalRamImage.Looks(data) ? FirmwareFileKind.ControllerRam : FirmwareFileKind.VpdImage;
+    {
+        if (PioneerFirmwareImage.Looks(data)) return FirmwareFileKind.PioneerUpdate;
+        if (OpticalRamImage.Looks(data)) return FirmwareFileKind.ControllerRam;
+        return FirmwareFileKind.VpdImage;
+    }
 }

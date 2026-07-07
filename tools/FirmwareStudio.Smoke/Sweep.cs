@@ -187,8 +187,31 @@ public static class Sweep
 
         byte[] data = File.ReadAllBytes(path);
 
-        // Auto-detect: a 0xF1 controller-RAM image vs a .1KN VPD flash image.
-        if (FirmwareFile.Identify(data) == FirmwareFileKind.ControllerRam)
+        // Auto-detect: a Pioneer updater vs a 0xF1 controller-RAM image vs a .1KN VPD flash image.
+        var kind = FirmwareFile.Identify(data);
+        if (kind == FirmwareFileKind.PioneerUpdate)
+        {
+            var pio = PioneerFirmwareImage.Parse(data);
+            Console.WriteLine($"Pioneer firmware update: {path}\n");
+            foreach (var d in pio.Diagnostics) Console.WriteLine("  " + d);
+            Console.WriteLine($"\n  {pio.Describe()}\n");
+            Console.WriteLine($"Parts ({pio.Parts.Count}):");
+            foreach (var part in pio.Parts)
+            {
+                Console.WriteLine($"  --- {part.PartName}  [{part.Source}] ---");
+                Console.WriteLine($"    ID         : {part.Id}");
+                Console.WriteLine($"    revision   : {part.RevisionLevel}");
+                Console.WriteLine($"    hardware   : {part.HardwareVersion}");
+                Console.WriteLine($"    file type  : {part.FileType}");
+                Console.WriteLine($"    generated  : {part.GeneratedDate}");
+                Console.WriteLine($"    part label : {part.PartLabel}  (selector {part.PartSelector})");
+                Console.WriteLine($"    body       : offset 0x{part.BodyOffset:X}, {part.BodyLength:N0} bytes, entropy {part.BodyEntropy:F3}");
+                Console.WriteLine($"    sha-256    : {part.Sha256}");
+            }
+            return 0;
+        }
+
+        if (kind == FirmwareFileKind.ControllerRam)
         {
             var ram = OpticalRamImage.Parse(data);
             Console.WriteLine($"Controller-RAM image: {path}\n");

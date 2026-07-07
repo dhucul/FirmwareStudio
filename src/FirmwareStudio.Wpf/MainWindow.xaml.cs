@@ -367,7 +367,7 @@ public partial class MainWindow : Window
     {
         var dlg = new OpenFileDialog
         {
-            Filter = "Firmware images (*.1KN;*.1JN;*.bin)|*.1KN;*.1JN;*.bin|All files (*.*)|*.*",
+            Filter = "Firmware images & updaters (*.1KN;*.1JN;*.bin;*.exe)|*.1KN;*.1JN;*.bin;*.exe|All files (*.*)|*.*",
             Title = "Analyze firmware file",
         };
         if (dlg.ShowDialog() != true) return;
@@ -382,8 +382,24 @@ public partial class MainWindow : Window
             Export8051Button.IsEnabled = false; _ramData = null; _ramInfo = null;
             AppendLog($"# Analyzed firmware file: {dlg.FileName}");
 
-            // Auto-detect: a 0xF1 controller-RAM image vs a .1KN VPD flash image.
-            if (FirmwareFile.Identify(data) == FirmwareFileKind.ControllerRam)
+            // Auto-detect: a Pioneer updater vs a 0xF1 controller-RAM image vs a .1KN VPD flash image.
+            var kind = FirmwareFile.Identify(data);
+            if (kind == FirmwareFileKind.PioneerUpdate)
+            {
+                var pio = PioneerFirmwareImage.Parse(data);
+                var sb = new System.Text.StringBuilder(pio.Describe());
+                foreach (var part in pio.Parts)
+                {
+                    sb.Append($"\n\n— {part.PartName} ({part.Source}) —");
+                    sb.Append($"\n  ID: {part.Id}   Revision Level: {part.RevisionLevel}   Hardware: {part.HardwareVersion}");
+                    sb.Append($"\n  File Type: {part.FileType}   Generated: {part.GeneratedDate}   Label: {part.PartLabel}");
+                    sb.Append($"\n  Body: 0x{part.BodyOffset:X}..0x{part.TotalSize:X} ({part.BodyLength:N0} B), entropy {part.BodyEntropy:F3}");
+                    sb.Append($"\n  SHA-256: {part.Sha256}");
+                }
+                ResultText.Text = sb.ToString();
+                foreach (var d in pio.Diagnostics) AppendLog("#   " + d);
+            }
+            else if (kind == FirmwareFileKind.ControllerRam)
             {
                 var info = OpticalRamImage.Parse(data);
                 _ramData = data; _ramInfo = info;
