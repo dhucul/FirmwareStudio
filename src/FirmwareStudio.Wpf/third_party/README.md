@@ -25,5 +25,5 @@ dotnet publish src/FirmwareStudio.Wpf -c Release -r win-x64 --self-contained tru
 & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\FirmwareStudio.iss
 ```
 
-The resulting `installer/Output/FirmwareStudio-1.10.0-Setup.exe` contains `CH341DLLA64.dll` next to the
+The resulting `installer/Output/FirmwareStudio-1.10.1-Setup.exe` contains `CH341DLLA64.dll` next to the
 executable.
