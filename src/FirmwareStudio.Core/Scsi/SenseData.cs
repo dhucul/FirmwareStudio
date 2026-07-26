@@ -37,12 +37,14 @@ public readonly struct SenseData
 
     public static SenseData Parse(byte[]? sense)
     {
-        if (sense is null || sense.Length < 14) return default;
+        if (sense is null || sense.Length < 1) return default;
         byte rc = (byte)(sense[0] & 0x7F);
-        bool present = rc is 0x70 or 0x71 or 0x72 or 0x73;
-        if (!present) return default;
         if (rc is 0x72 or 0x73) // descriptor format
+        {
+            if (sense.Length < 4) return default;
             return new SenseData((byte)(sense[1] & 0x0F), sense[2], sense[3], true);
+        }
+        if (rc is not (0x70 or 0x71) || sense.Length < 14) return default;
         // fixed format
         return new SenseData((byte)(sense[2] & 0x0F), sense[12], sense[13], true);
     }

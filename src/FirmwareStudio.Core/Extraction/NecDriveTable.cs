@@ -407,7 +407,7 @@ public static class NecDriveTable
         {
             var r = device.SendCommand(ScsiCommand.NecReadRam(false, addr, 0x20), ScsiDirection.In,
                 new byte[0x20], note: $"NEC ReadRAM 0xCC identify off=0x{addr:X}");
-            if (!r.Good || r.Data is null || r.Data.Length < 4) continue;
+            if (!r.Good || r.Data is null || r.Data.Length < 4 || r.TransferredLength < 4) continue;
             anyAccepted = true;
             string code = Encoding.ASCII.GetString(r.Data, 0, 4);
             reads.Add((addr, code));

@@ -4,4 +4,5 @@ namespace FirmwareStudio.Core.Hardware;
 public sealed class Ch341Exception : Exception
 {
     public Ch341Exception(string message) : base(message) { }
+    public Ch341Exception(string message, Exception innerException) : base(message, innerException) { }
 }

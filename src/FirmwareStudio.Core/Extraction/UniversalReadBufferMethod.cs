@@ -38,7 +38,9 @@ public sealed class UniversalReadBufferMethod : IFirmwareExtractionMethod
             ct.ThrowIfCancellationRequested();
             var desc = device.SendCommand(ScsiCommand.ReadBufferDescriptor(bufId), ScsiDirection.In,
                 new byte[4], note: $"READ BUFFER descriptor id={bufId}");
-            int cap = desc.Good && desc.Data is { Length: >= 4 } d ? ScsiCommand.ReadBe24(d, 1) : 0;
+            int cap = desc.Good && desc.Data is { Length: >= 4 } d && desc.TransferredLength >= 4
+                ? ScsiCommand.ReadBe24(d, 1)
+                : 0;
             if (cap > 0)
             {
                 capacities.Add((bufId, cap));
@@ -53,49 +55,51 @@ public sealed class UniversalReadBufferMethod : IFirmwareExtractionMethod
                 "in software; a hardware SPI/flash programmer is probably required.");
         }
 
-        var target = capacities.OrderByDescending(c => c.Capacity).First();
-        int total = Math.Min(target.Capacity, MaxCapacity);
-        progress.Report(new ExtractionProgress(0, $"Reading buffer {target.Id} ({total:N0} bytes)",
-            $"Selected buffer {target.Id} of {capacities.Count} readable buffer(s)."));
-
-        var outData = new byte[total];
-        int got = 0;
-        while (got < total)
+        foreach (var target in capacities.OrderByDescending(c => c.Capacity))
         {
-            ct.ThrowIfCancellationRequested();
-            int len = Math.Min(ChunkSize, total - got);
-            var read = device.SendCommand(ScsiCommand.ReadBufferData(target.Id, got, len), ScsiDirection.In,
-                new byte[len], note: $"READ BUFFER data id={target.Id} off={got} len={len}");
-            if (!read.Good || read.Data is null)
+            int total = Math.Min(target.Capacity, MaxCapacity);
+            progress.Report(new ExtractionProgress(0, $"Reading buffer {target.Id} ({total:N0} bytes)",
+                $"Trying buffer {target.Id} of {capacities.Count} advertised readable buffer(s)."));
+
+            var outData = new byte[total];
+            int got = 0;
+            while (got < total)
             {
-                progress.Report(new ExtractionProgress(0, null,
-                    $"Read stopped at offset {got:N0} ({read.StatusText}); keeping {got:N0} bytes."));
-                break;
+                ct.ThrowIfCancellationRequested();
+                int len = Math.Min(ChunkSize, total - got);
+                var read = device.SendCommand(ScsiCommand.ReadBufferData(target.Id, got, len), ScsiDirection.In,
+                    new byte[len], note: $"READ BUFFER data id={target.Id} off={got} len={len}");
+                if (!read.Good || read.Data is null)
+                {
+                    progress.Report(new ExtractionProgress(0, null,
+                        $"Buffer {target.Id} stopped at offset {got:N0} ({read.StatusText})."));
+                    break;
+                }
+                // Honour the drive-reported transfer length — a GOOD read of 0 bytes is end-of-data, not a
+                // chunk of zeros to append.
+                int n = read.TransferredLength;
+                if (n <= 0 || n > len || n > read.Data.Length)
+                {
+                    progress.Report(new ExtractionProgress(0, null,
+                        $"Buffer {target.Id} returned invalid/empty length {n} at offset {got:N0}."));
+                    break;
+                }
+                Array.Copy(read.Data, 0, outData, got, n);
+                got += n;
+                progress.Report(new ExtractionProgress((int)(100L * got / total)));
             }
-            // Honour the drive-reported transfer length — a GOOD read of 0 bytes is end-of-data, not a chunk
-            // of zeros to append. (The old code copied the full requested length regardless, which quietly
-            // padded the dump with zeros when a request truncated to a 0-byte transfer.)
-            int n = read.TransferredLength;
-            if (n < 0 || n > len) n = len;
-            if (n == 0)
+
+            if (got > 0)
             {
-                progress.Report(new ExtractionProgress(0, null,
-                    $"Empty read at offset {got:N0}; keeping {got:N0} bytes."));
-                break;
+                byte[] result = got == total ? outData : outData[..got];
+                return ExtractionResult.Ok(Id, DisplayName, result,
+                    "controller buffer contents (may or may not be firmware/microcode)",
+                    $"Read {got:N0} bytes from controller buffer {target.Id}. " +
+                    $"Buffers with capacity: {string.Join(", ", capacities.Select(c => $"#{c.Id}={c.Capacity:N0}"))}.");
             }
-            Array.Copy(read.Data, 0, outData, got, n);
-            got += n;
-            progress.Report(new ExtractionProgress((int)(100L * got / total)));
         }
 
-        if (got == 0)
-            return ExtractionResult.Unsupported(Id, DisplayName,
-                "The drive advertised a buffer but returned no data when read.");
-
-        byte[] result = got == total ? outData : outData[..got];
-        return ExtractionResult.Ok(Id, DisplayName, result,
-            "controller buffer contents (may or may not be firmware/microcode)",
-            $"Read {got:N0} bytes from controller buffer {target.Id}. " +
-            $"Buffers with capacity: {string.Join(", ", capacities.Select(c => $"#{c.Id}={c.Capacity:N0}"))}.");
+        return ExtractionResult.Unsupported(Id, DisplayName,
+            $"The drive advertised {capacities.Count} buffer(s), but none returned data when read.");
     }
 }

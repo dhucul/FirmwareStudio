@@ -13,6 +13,13 @@ public enum FirmwareFileKind
     PioneerUpdate,
 }
 
+/// <summary>A firmware file routed to exactly one structured parser.</summary>
+public sealed record FirmwareFileAnalysis(
+    FirmwareFileKind Kind,
+    PioneerUpdateInfo? Pioneer = null,
+    OpticalRamImageInfo? ControllerRam = null,
+    FirmwareImageInfo? Vpd = null);
+
 /// <summary>
 /// One decision point for "what is this firmware file?" so both the WPF app and the Smoke tool route a
 /// dropped/opened file to the right structured parser instead of always assuming a <c>.1KN</c> wrapper.
@@ -22,9 +29,26 @@ public enum FirmwareFileKind
 public static class FirmwareFile
 {
     public static FirmwareFileKind Identify(byte[] data)
+        => Analyze(data).Kind;
+
+    /// <summary>
+    /// Detect and parse a file in one pass. This avoids rescanning PE resources or inflating an SFX once
+    /// for identification and again for the actual analysis.
+    /// </summary>
+    public static FirmwareFileAnalysis Analyze(byte[] data)
     {
-        if (PioneerFirmwareImage.Looks(data)) return FirmwareFileKind.PioneerUpdate;
-        if (OpticalRamImage.Looks(data)) return FirmwareFileKind.ControllerRam;
-        return FirmwareFileKind.VpdImage;
+        ArgumentNullException.ThrowIfNull(data);
+        if (OpticalRamImage.Looks(data))
+            return new FirmwareFileAnalysis(
+                FirmwareFileKind.ControllerRam,
+                ControllerRam: OpticalRamImage.Parse(data));
+
+        var pioneer = PioneerFirmwareImage.Parse(data);
+        if (pioneer.Parts.Count > 0)
+            return new FirmwareFileAnalysis(FirmwareFileKind.PioneerUpdate, Pioneer: pioneer);
+
+        return new FirmwareFileAnalysis(
+            FirmwareFileKind.VpdImage,
+            Vpd: FirmwareImage.Parse(data));
     }
 }

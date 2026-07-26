@@ -25,6 +25,7 @@ public partial class MainWindow : Window
     private DriveIdentity? _id;
     private ChipsetInfo? _chip;
     private ExtractionResult? _lastResult;
+    private IReadOnlyList<CommandLogEntry> _lastRunCommands = Array.Empty<CommandLogEntry>();
     private byte[]? _ramData;              // last analyzed controller-RAM dump bytes (for 8051 export)
     private OpticalRamImageInfo? _ramInfo; // its structured parse (carries the 8051 CodeBankInfo)
     private CancellationTokenSource? _cts;
@@ -139,15 +140,41 @@ public partial class MainWindow : Window
 
     private void RefreshDrives()
     {
+        ClearDriveContext();
         var drives = DriveEnumerator.Scan();
         DriveCombo.ItemsSource = drives;
         if (drives.Count > 0) DriveCombo.SelectedIndex = 0;
         AppendLog($"# {drives.Count} optical drive(s) found.");
     }
 
+    private void OnDriveChanged(object sender, SelectionChangedEventArgs e) => ClearDriveContext();
+
+    private void ClearDriveContext()
+    {
+        _id = null;
+        _chip = null;
+        _lastResult = null;
+        _lastRunCommands = Array.Empty<CommandLogEntry>();
+        _ramData = null;
+        _ramInfo = null;
+        VendorText.Text = ModelText.Text = FwText.Text = SerialText.Text = BusText.Text = "—";
+        ChipsetText.Text = ChipEvidence.Text = "";
+        MethodsPanel.Children.Clear();
+        ResultText.Text = "";
+        ResultText.Foreground = Palette.TextBrush;
+        HexBox.Clear();
+        PreviewHeader.Text = "Dump preview";
+        Progress.Value = 0;
+        StageText.Text = "";
+        ExtractButton.IsEnabled = false;
+        SaveButton.IsEnabled = false;
+        Export8051Button.IsEnabled = false;
+    }
+
     private async void OnIdentify(object sender, RoutedEventArgs e)
     {
         if (DriveCombo.SelectedItem is not OpticalDrive drive) return;
+        ClearDriveContext();
         SetControlsBusy(true);
         StageText.Text = "Identifying…";
         try
@@ -246,9 +273,18 @@ public partial class MainWindow : Window
     private async void OnExtract(object sender, RoutedEventArgs e)
     {
         if (_id is null || _chip is null || DriveCombo.SelectedItem is not OpticalDrive drive) return;
+        if (_id.DriveLetter != drive.Letter)
+        {
+            ClearDriveContext();
+            ShowError("The selected drive changed after identification. Identify the current drive before extracting.");
+            return;
+        }
 
         bool isAuto = MethodCombo.SelectedItem is not MethodChoice { Id: { } };
         var method = isAuto ? null : ResolveMethod();
+        _lastResult = null;
+        _lastRunCommands = Array.Empty<CommandLogEntry>();
+        int commandStart = _logger.Entries.Count;
         _cts = new CancellationTokenSource();
         SetControlsBusy(true);
         CancelButton.IsEnabled = true;
@@ -274,6 +310,7 @@ public partial class MainWindow : Window
                 ? await _orch.RunAutoAsync(dev, _id, _chip, progress, _cts.Token)
                 : await _orch.RunAsync(dev, _id, _chip, method!, progress, _cts.Token);
             _lastResult = result;
+            _lastRunCommands = _logger.Entries.Skip(commandStart).ToArray();
             ShowResult(result);
         }
         catch (OperationCanceledException)
@@ -347,12 +384,10 @@ public partial class MainWindow : Window
         if (dlg.ShowDialog() != true) return;
         try
         {
-            var files = DumpWriter.Write(dlg.FileName, _lastResult, _id, _chip, _logger.Entries, now);
-            string logPath = Path.ChangeExtension(dlg.FileName, ".log");
-            _logger.WriteAllTo(logPath);
+            var files = DumpWriter.Write(dlg.FileName, _lastResult, _id, _chip, _lastRunCommands, now);
             AppendLog($"# Saved: {files.BinPath}");
             AppendLog($"# Saved: {files.SidecarPath}");
-            AppendLog($"# Saved: {logPath}");
+            if (files.LogPath is not null) AppendLog($"# Saved: {files.LogPath}");
             StageText.Text = "Saved.";
         }
         catch (Exception ex)
@@ -363,7 +398,7 @@ public partial class MainWindow : Window
 
     // Open a firmware update image (.1KN/.1JN) or a saved dump and characterise it — no drive required.
     // This is a read-only file analysis: it never writes to a drive and never flashes anything.
-    private void OnAnalyzeFile(object sender, RoutedEventArgs e)
+    private async void OnAnalyzeFile(object sender, RoutedEventArgs e)
     {
         var dlg = new OpenFileDialog
         {
@@ -371,22 +406,34 @@ public partial class MainWindow : Window
             Title = "Analyze firmware file",
         };
         if (dlg.ShowDialog() != true) return;
+        AnalyzeFileButton.IsEnabled = false;
+        SaveButton.IsEnabled = false;
+        Export8051Button.IsEnabled = false;
+        _lastResult = null;
+        _lastRunCommands = Array.Empty<CommandLogEntry>();
+        _ramData = null;
+        _ramInfo = null;
+        StageText.Text = "Analyzing firmware file…";
+        SetControlsBusy(true);
         try
         {
-            byte[] data = File.ReadAllBytes(dlg.FileName);
+            var parsed = await Task.Run(() =>
+            {
+                byte[] bytes = File.ReadAllBytes(dlg.FileName);
+                return (Data: bytes, Analysis: FirmwareFile.Analyze(bytes));
+            });
+            byte[] data = parsed.Data;
+            var analysis = parsed.Analysis;
             StageText.Text = "Firmware file analyzed.";
             ResultText.Foreground = Palette.TextBrush;
             PreviewHeader.Text = $"File preview — {data.Length:N0} bytes ({Path.GetFileName(dlg.FileName)})";
             HexBox.Text = HexDump.Format(data);
-            SaveButton.IsEnabled = false;   // a file analysis is not an extraction result to re-save
-            Export8051Button.IsEnabled = false; _ramData = null; _ramInfo = null;
             AppendLog($"# Analyzed firmware file: {dlg.FileName}");
 
             // Auto-detect: a Pioneer updater vs a 0xF1 controller-RAM image vs a .1KN VPD flash image.
-            var kind = FirmwareFile.Identify(data);
-            if (kind == FirmwareFileKind.PioneerUpdate)
+            if (analysis.Kind == FirmwareFileKind.PioneerUpdate)
             {
-                var pio = PioneerFirmwareImage.Parse(data);
+                var pio = analysis.Pioneer!;
                 var sb = new System.Text.StringBuilder(pio.Describe());
                 foreach (var part in pio.Parts)
                 {
@@ -399,9 +446,9 @@ public partial class MainWindow : Window
                 ResultText.Text = sb.ToString();
                 foreach (var d in pio.Diagnostics) AppendLog("#   " + d);
             }
-            else if (kind == FirmwareFileKind.ControllerRam)
+            else if (analysis.Kind == FirmwareFileKind.ControllerRam)
             {
-                var info = OpticalRamImage.Parse(data);
+                var info = analysis.ControllerRam!;
                 _ramData = data; _ramInfo = info;
                 Export8051Button.IsEnabled = info.CodeBank is not null;
                 string ident = info.Model is null ? "" :
@@ -420,7 +467,7 @@ public partial class MainWindow : Window
             }
             else
             {
-                var info = FirmwareImage.Parse(data);
+                var info = analysis.Vpd!;
                 string ident = info.Model is null ? "" :
                     $"\nModel: {info.Model}    Version: {info.Version}    Build: {info.DateCode ?? "n/a"}";
                 ResultText.Text = info.Describe() + ident;
@@ -431,6 +478,10 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             ShowError($"Analyze failed: {ex.Message}");
+        }
+        finally
+        {
+            SetControlsBusy(false);
         }
     }
 
@@ -519,6 +570,8 @@ public partial class MainWindow : Window
         DriveCombo.IsEnabled = !busy;
         MethodCombo.IsEnabled = !busy;
         ExtractButton.IsEnabled = !busy && _id is not null;
+        AnalyzeFileButton.IsEnabled = !busy;
+        if (busy) Export8051Button.IsEnabled = false;
     }
 
     // Serialize all hardware-tab actions: only one may touch the single CH341 adapter at a time.
@@ -526,7 +579,10 @@ public partial class MainWindow : Window
     {
         HwDetectButton.IsEnabled = !busy;
         HwIdentifyButton.IsEnabled = !busy;
-        HwReadButton.IsEnabled = !busy && _hwChip?.SizeKnown == true;
+        bool validChip = _hwChip is { SizeKnown: true, LooksEmpty: false };
+        HwReadButton.IsEnabled = !busy && validChip;
+        HwSaveButton.IsEnabled = !busy && validChip && _hwDump is not null &&
+                                 _hwDump.LongLength == _hwChip!.SizeBytes;
     }
 
     private void AppendLog(string line) => AppendConsole(LogBox, line);
@@ -555,6 +611,7 @@ public partial class MainWindow : Window
 
     private async void OnHwDetect(object sender, RoutedEventArgs e)
     {
+        ClearHardwareCapture(clearChip: true);
         SetHwBusy(true);
         try
         {
@@ -571,6 +628,12 @@ public partial class MainWindow : Window
             HwAdapterText.Foreground = ok ? Palette.GreenBrush : Palette.PeachBrush;
             HwLog("# " + message);
         }
+        catch (Exception ex)
+        {
+            HwAdapterText.Text = ex.Message;
+            HwAdapterText.Foreground = Palette.PeachBrush;
+            HwShowError(ex.Message);
+        }
         finally
         {
             SetHwBusy(false);
@@ -579,6 +642,7 @@ public partial class MainWindow : Window
 
     private async void OnHwIdentify(object sender, RoutedEventArgs e)
     {
+        ClearHardwareCapture(clearChip: true);
         SetHwBusy(true);
         HwStageText.Text = "Identifying chip…";
         try
@@ -588,7 +652,6 @@ public partial class MainWindow : Window
                 using var d = Ch341Device.Open();
                 return SpiNorFlash.ReadId(d, HwLogBg);
             });
-            _hwChip = chip;
             HwChipNameText.Text = chip.Name;
             HwChipIdText.Text = chip.IdHex;
             HwChipSizeText.Text = chip.SizeText;
@@ -614,8 +677,8 @@ public partial class MainWindow : Window
             }
             else
             {
+                _hwChip = chip;
                 HwStageText.Text = "Chip identified.";
-                HwReadButton.IsEnabled = true;
                 if (chip.IsLikely1V8)
                 {
                     HwResultText.Foreground = Palette.PeachBrush;
@@ -641,9 +704,10 @@ public partial class MainWindow : Window
 
     private async void OnHwRead(object sender, RoutedEventArgs e)
     {
-        if (_hwChip is null || !_hwChip.SizeKnown) return;
+        if (_hwChip is null || !_hwChip.SizeKnown || _hwChip.LooksEmpty) return;
 
         var chip = _hwChip;
+        ClearHardwareCapture(clearChip: false);
         _hwCts = new CancellationTokenSource();
         SetHwBusy(true);
         HwCancelButton.IsEnabled = true;
@@ -661,6 +725,9 @@ public partial class MainWindow : Window
                 using var d = Ch341Device.Open();
                 return SpiNorFlash.ReadAll(d, chip, progress, HwLogBg, ct);
             });
+            if (data.LongLength != chip.SizeBytes)
+                throw new InvalidDataException(
+                    $"SPI read returned {data.LongLength:N0} bytes; expected {chip.SizeBytes:N0}. The partial dump was discarded.");
             _hwDump = data;
             HwProgress.Value = 100;
             HwStageText.Text = "Done.";
@@ -668,7 +735,6 @@ public partial class MainWindow : Window
             HwResultText.Text = $"Read {data.Length:N0} bytes from {chip.Name}.";
             HwPreviewHeader.Text = $"Dump preview — {data.Length:N0} bytes";
             HwHexBox.Text = HexDump.Format(data);
-            HwSaveButton.IsEnabled = true;
         }
         catch (OperationCanceledException)
         {
@@ -692,7 +758,12 @@ public partial class MainWindow : Window
 
     private void OnHwSave(object sender, RoutedEventArgs e)
     {
-        if (_hwDump is null || _hwChip is null) return;
+        if (_hwDump is null || _hwChip is null || _hwChip.LooksEmpty || !_hwChip.SizeKnown ||
+            _hwDump.LongLength != _hwChip.SizeBytes)
+        {
+            HwShowError("No complete dump exists for the currently identified chip.");
+            return;
+        }
         var now = DateTime.UtcNow;
         var dlg = new SaveFileDialog
         {
@@ -720,6 +791,23 @@ public partial class MainWindow : Window
         HwResultText.Foreground = Palette.RedBrush;
         HwResultText.Text = message;
         HwLog("# ERROR: " + message);
+    }
+
+    private void ClearHardwareCapture(bool clearChip)
+    {
+        _hwDump = null;
+        HwSaveButton.IsEnabled = false;
+        HwProgress.Value = 0;
+        HwHexBox.Clear();
+        HwPreviewHeader.Text = "Dump preview";
+        HwResultText.Text = "";
+        HwStageText.Text = "";
+        if (!clearChip) return;
+
+        _hwChip = null;
+        HwChipNameText.Text = HwChipIdText.Text = HwChipSizeText.Text = HwChipVoltageText.Text = "—";
+        HwChipVoltageText.Foreground = Palette.TextBrush;
+        HwReadButton.IsEnabled = false;
     }
 
     private void HwLog(string line)

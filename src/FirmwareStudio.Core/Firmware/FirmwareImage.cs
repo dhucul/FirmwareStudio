@@ -79,7 +79,8 @@ public static class FirmwareImage
 
     public static FirmwareImageInfo Parse(byte[] data)
     {
-        bool isVpd = data.Length > 0x420 && IndexOf(data, VpdMarker, 0x300, 0x600) >= 0;
+        bool isVpd = data.Length >= 0x400 + VpdMarker.Length &&
+                     data.AsSpan(0x400, VpdMarker.Length).SequenceEqual(VpdMarker);
         string? magic = AsciiAt(data, 0, 19);
         string? model = data.Length >= ModelOffset + 24 ? AsciiAt(data, ModelOffset, 24) : null;
         string? version = data.Length >= 4 ? AsciiAt(data, data.Length - 4, 4) : null;

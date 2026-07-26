@@ -37,11 +37,12 @@ public sealed class Ch341Device : IDisposable
         {
             handle = Ch341Native.CH341OpenDevice(index);
         }
-        catch (DllNotFoundException)
+        catch (Exception ex) when (ex is DllNotFoundException or BadImageFormatException or EntryPointNotFoundException)
         {
             throw new Ch341Exception(
                 "CH341 driver/DLL not found. Install the WCH CH341PAR driver (it provides CH341DLLA64.dll), " +
-                "or place the 64-bit CH341 DLL next to FirmwareStudio.exe.");
+                "or place a compatible 64-bit CH341 DLL next to FirmwareStudio.exe. " +
+                $"Native loader error: {ex.Message}", ex);
         }
 
         if (handle == InvalidHandle || handle == IntPtr.Zero)
@@ -53,6 +54,12 @@ public sealed class Ch341Device : IDisposable
         try
         {
             dev.SetSpiMode();
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or BadImageFormatException or EntryPointNotFoundException)
+        {
+            dev.Dispose();
+            throw new Ch341Exception(
+                $"The CH341 native library is incompatible or missing a required SPI function: {ex.Message}", ex);
         }
         catch
         {

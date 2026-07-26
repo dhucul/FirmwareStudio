@@ -129,9 +129,10 @@ public sealed class MediaTekCacheReadMethod : IFirmwareExtractionMethod
         var additional = new List<(uint Offset, byte[] Data)>();
         if (mirrorPeriod > 0 && written > mirrorPeriod)
         {
-            // Probe from the next candidate base above the mirror region, jumping in mirror-sized steps.
+            // Probe from the first unread byte, then jump in mirror-sized steps. The initial read can stop
+            // between mirror boundaries after a short transfer; rounding up would skip that entire region.
             // The controller may have placed a different region at a non-mirror-aligned offset.
-            long nextCandidate = ((long)(written / mirrorPeriod) + 1) * mirrorPeriod;
+            long nextCandidate = written;
             for (int attempt = 0; attempt < 8 && nextCandidate < MaxSize; attempt++)
             {
                 long probeOff = nextCandidate + attempt * mirrorPeriod;
@@ -156,7 +157,8 @@ public sealed class MediaTekCacheReadMethod : IFirmwareExtractionMethod
                 int regionSize = Math.Min(mirrorPeriod, (int)(MaxSize - probeOffset));
                 var regionBuf = new byte[regionSize];
                 int regionWritten = 0;
-                for (uint roff = 0; roff < regionSize; roff += ChunkSize)
+                uint roff = 0;
+                while (roff < regionSize)
                 {
                     ct.ThrowIfCancellationRequested();
                     uint rlen = Math.Min((uint)ChunkSize, (uint)(regionSize - roff));
@@ -169,15 +171,16 @@ public sealed class MediaTekCacheReadMethod : IFirmwareExtractionMethod
                     if (rgot == 0) break;
                     Array.Copy(rr.Data, 0, regionBuf, regionWritten, rgot);
                     regionWritten += rgot;
+                    roff += (uint)rgot;
                     // Stop if data turns to all zeros (end of this region)
                     bool allZero = true;
                     for (int i = 0; i < rgot; i++) if (rr.Data[i] != 0) { allZero = false; break; }
                     if (allZero) break;
                 }
 
-                // Trim trailing zeros
+                // Preserve every byte the device reported as transferred. A valid firmware region may
+                // legitimately end in zero-filled tables or padding.
                 int rkeep = regionWritten;
-                while (rkeep > 0 && regionBuf[rkeep - 1] == 0) rkeep--;
                 if (rkeep > 64)   // must have meaningful data (more than just a 64-byte status blob)
                 {
                     // Verify it's not just another mirror of the primary region

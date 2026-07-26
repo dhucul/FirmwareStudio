@@ -158,6 +158,8 @@ clearly reports why the drive is unsupported (e.g. "needs a hardware programmer"
 ## Safety
 
 - Strictly read-only: no `0x3B` WRITE BUFFER, no flash-write opcodes.
-- Vendor commands are gated behind chipset detection and use tiny/zero allocation lengths.
+- Auto tries vendor methods through bounded, read-only support probes and proceeds only when the command
+  returns data or explicitly reports a recognized-but-invalid field; transient drive states do not trigger
+  broad follow-up sweeps. Chipset detection informs the UI but is not treated as proof of command support.
 - Bounded command timeout + cancellation; every CDB is logged before it is issued.
 - Requires administrator (enforced by the app manifest).

@@ -97,6 +97,10 @@ public sealed class PldsVendorReadMethod : IFirmwareExtractionMethod
         if (!probe.DeviceIoOk)
             return ExtractionResult.Unsupported(Id, DisplayName,
                 $"Could not issue the 0xDF vendor command ({probe.StatusText}).");
+        if (!probe.Good && !s.FieldInvalid)
+            return ExtractionResult.Unsupported(Id, DisplayName,
+                $"The 0xDF support probe was inconclusive ({probe.StatusText}); the broad buffer sweep was " +
+                "not attempted. Retry after the drive is ready.");
 
         // 2. PHASE 1 — quick probe of every (bufferId, arg3) combination.
         var discovered = new List<Slot>();
@@ -114,7 +118,8 @@ public sealed class PldsVendorReadMethod : IFirmwareExtractionMethod
                     null, $"Probe {probed}/{totalSlots}: buf=0x{bufId:X2} arg3=0x{arg3:X2}"));
 
                 if (!r.Good || r.Data is null) continue;
-                int len = r.TransferredLength is > 0 and <= ProbeLen ? r.TransferredLength : ProbeLen;
+                int len = r.TransferredLength;
+                if (len <= 0 || len > ProbeLen || len > r.Data.Length) continue;
                 long nz = CountNonZero(r.Data, len);
                 if (nz > 0)
                 {
@@ -147,13 +152,11 @@ public sealed class PldsVendorReadMethod : IFirmwareExtractionMethod
                 note: $"PLDS 0xDF deep buf=0x{slot.BufferId:X2} arg3=0x{slot.Arg3:X2} len={MaxPerSlot}");
 
             if (!r.Good || r.Data is null) continue;
-            int got = r.TransferredLength > 0 && r.TransferredLength <= MaxPerSlot ? r.TransferredLength : MaxPerSlot;
-            if (got == 0) continue;
+            int got = r.TransferredLength;
+            if (got <= 0 || got > MaxPerSlot || got > r.Data.Length) continue;
 
-            // Trim trailing zeros
+            // Preserve the complete transferred span. Zero-filled tails can be part of a valid RAM layout.
             int keep = got;
-            while (keep > 0 && r.Data[keep - 1] == 0) keep--;
-            if (keep == 0) continue;
 
             long nz = CountNonZero(r.Data, keep);
             if (nz > 0)

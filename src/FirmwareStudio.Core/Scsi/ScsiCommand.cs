@@ -124,6 +124,12 @@ public static class ScsiCommand
 
     public static void WriteBe24(byte[] buf, int at, int value)
     {
+        ArgumentNullException.ThrowIfNull(buf);
+        if ((uint)value > 0x00FF_FFFF)
+            throw new ArgumentOutOfRangeException(nameof(value), "A 24-bit value must be in the range 0..0xFFFFFF.");
+        if (at < 0 || at > buf.Length - 3)
+            throw new ArgumentOutOfRangeException(nameof(at), "The destination must have room for three bytes.");
+
         buf[at] = (byte)((value >> 16) & 0xFF);
         buf[at + 1] = (byte)((value >> 8) & 0xFF);
         buf[at + 2] = (byte)(value & 0xFF);
@@ -131,6 +137,10 @@ public static class ScsiCommand
 
     public static void WriteBe32(byte[] buf, int at, uint value)
     {
+        ArgumentNullException.ThrowIfNull(buf);
+        if (at < 0 || at > buf.Length - 4)
+            throw new ArgumentOutOfRangeException(nameof(at), "The destination must have room for four bytes.");
+
         buf[at] = (byte)((value >> 24) & 0xFF);
         buf[at + 1] = (byte)((value >> 16) & 0xFF);
         buf[at + 2] = (byte)((value >> 8) & 0xFF);
@@ -138,5 +148,10 @@ public static class ScsiCommand
     }
 
     public static int ReadBe24(byte[] buf, int at)
-        => (buf[at] << 16) | (buf[at + 1] << 8) | buf[at + 2];
+    {
+        ArgumentNullException.ThrowIfNull(buf);
+        if (at < 0 || at > buf.Length - 3)
+            throw new ArgumentOutOfRangeException(nameof(at), "The source must contain three bytes.");
+        return (buf[at] << 16) | (buf[at + 1] << 8) | buf[at + 2];
+    }
 }

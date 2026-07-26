@@ -12,13 +12,16 @@ namespace FirmwareStudio.Core.Firmware;
 /// </summary>
 internal static class ZipSfxExtractor
 {
+    private const int MaxInnerExeBytes = 64 * 1024 * 1024;
+
     /// <summary>Cheap smell test: does the file carry a WinRAR SFX marker? (Avoids inflating arbitrary PEs.)</summary>
     public static bool LooksLikeWinRarSfx(byte[] data)
         => IndexOfAscii(data, "RarSFX") >= 0 || IndexOfAscii(data, "WinRAR SFX") >= 0;
 
     public static byte[]? ExtractInnerExe(byte[] data)
     {
-        for (int p = 0; p + 30 < data.Length; p++)
+        if (data.Length < 30) return null;
+        for (int p = 0; p <= data.Length - 30; p++)
         {
             if (data[p] != 0x50 || data[p + 1] != 0x4B || data[p + 2] != 0x03 || data[p + 3] != 0x04)
                 continue; // not "PK\x03\x04"
@@ -28,13 +31,15 @@ internal static class ZipSfxExtractor
             uint uncomp = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(p + 22));
             ushort nameLen = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(p + 26));
             ushort extraLen = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(p + 28));
-            if (p + 30 + nameLen > data.Length) continue;
+            long nameEnd = (long)p + 30 + nameLen;
+            if (nameEnd > data.Length) continue;
 
             string name = Encoding.ASCII.GetString(data, p + 30, nameLen);
             if (!name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) continue;
 
-            int dataStart = p + 30 + nameLen + extraLen;
-            if (dataStart >= data.Length) continue;
+            long dataStartLong = nameEnd + extraLen;
+            if (dataStartLong >= data.Length) continue;
+            int dataStart = (int)dataStartLong;
 
             byte[]? inner = TryInflate(data, dataStart, method, compSize, uncomp);
             if (inner is not null && PeResourceReader.IsPe(inner))
@@ -47,22 +52,36 @@ internal static class ZipSfxExtractor
     {
         try
         {
+            if (start < 0 || start > data.Length ||
+                compSize > int.MaxValue || uncomp > MaxInnerExeBytes)
+                return null;
+
             switch (method)
             {
                 case 0: // stored
                 {
-                    int len = (int)(uncomp != 0 ? uncomp : compSize);
-                    if (len <= 0 || start + len > data.Length) return null;
+                    uint advertised = uncomp != 0 ? uncomp : compSize;
+                    if (advertised == 0 || advertised > MaxInnerExeBytes) return null;
+                    int len = (int)advertised;
+                    if (len > data.Length - start) return null;
                     return data.AsSpan(start, len).ToArray();
                 }
                 case 8: // raw DEFLATE — DeflateStream stops at the stream's logical end
                 {
                     int srcLen = compSize != 0 ? (int)compSize : data.Length - start;
-                    if (start + srcLen > data.Length) srcLen = data.Length - start;
+                    if (srcLen <= 0) return null;
+                    if (srcLen > data.Length - start) srcLen = data.Length - start;
                     using var ms = new MemoryStream(data, start, srcLen, writable: false);
                     using var ds = new DeflateStream(ms, CompressionMode.Decompress);
                     using var outp = new MemoryStream(uncomp > 0 ? (int)uncomp : 0);
-                    ds.CopyTo(outp);
+                    var chunk = new byte[81920];
+                    while (true)
+                    {
+                        int read = ds.Read(chunk, 0, chunk.Length);
+                        if (read == 0) break;
+                        if (outp.Length + read > MaxInnerExeBytes) return null;
+                        outp.Write(chunk, 0, read);
+                    }
                     return outp.ToArray();
                 }
                 default:

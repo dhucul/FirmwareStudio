@@ -81,7 +81,7 @@ public static class PioneerFirmwareImage
 
     /// <summary>True if <paramref name="data"/> begins with the Pioneer microcode signature.</summary>
     public static bool LooksLikeImage(byte[] data)
-        => data.Length >= Signature.Length && data.AsSpan(0, Signature.Length).SequenceEqual(Signature);
+        => data.Length >= HeaderSize && data.AsSpan(0, Signature.Length).SequenceEqual(Signature);
 
     /// <summary>Cheap-ish detector for <see cref="FirmwareFile.Identify"/>: raw image, PE with BINARY images, or a Pioneer SFX.</summary>
     public static bool Looks(byte[] data)
@@ -126,8 +126,11 @@ public static class PioneerFirmwareImage
         var res = PeResourceReader.Read(pe);
         if (!res.Any(r => LooksLikeImage(r.Data)))
         {
-            diag.Add("Detected: PE with no firmware resources — probing for a WinRAR-SFX inner .exe ...");
-            var inner = ZipSfxExtractor.ExtractInnerExe(data);
+            bool isSfx = ZipSfxExtractor.LooksLikeWinRarSfx(data);
+            diag.Add(isSfx
+                ? "Detected: WinRAR SFX with no outer firmware resources — probing its inner .exe ..."
+                : "Detected: PE with no Pioneer firmware resources.");
+            var inner = isSfx ? ZipSfxExtractor.ExtractInnerExe(data) : null;
             if (inner is not null)
             {
                 diag.Add($"        unwrapped inner PE ({inner.Length:N0} bytes)");

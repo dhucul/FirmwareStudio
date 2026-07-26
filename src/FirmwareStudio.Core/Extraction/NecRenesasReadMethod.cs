@@ -85,7 +85,11 @@ public sealed class NecRenesasReadMethod : IFirmwareExtractionMethod
             {
                 var ir = device.SendCommand(ScsiCommand.NecReadRam(false, idAddr, 4), ScsiDirection.In,
                     new byte[4], note: $"NEC ReadRAM 0xCC firmware-id off=0x{idAddr:X}");
-                if (ir.Good && ir.Data is { Length: >= 1 }) fwId = ir.Data[0];
+                if (!ir.Good || ir.Data is null || ir.TransferredLength < 1)
+                    return ExtractionResult.Unsupported(Id, DisplayName,
+                        $"Identified {sig.Model}, but its required firmware ID could not be read at 0x{idAddr:X} " +
+                        $"({ir.StatusText}). The keyed flash read was not attempted.");
+                fwId = ir.Data[0];
             }
 
             return DumpRegions(device, progress, ct, regions, fwId, needsId,
@@ -113,21 +117,32 @@ public sealed class NecRenesasReadMethod : IFirmwareExtractionMethod
 
         foreach (var reg in regions)
         {
-            for (uint addr = reg.Start; addr < reg.End; addr += BlockSize)
+            uint addr = reg.Start;
+            while (addr < reg.End)
             {
                 ct.ThrowIfCancellationRequested();
-                var r = device.SendCommand(ScsiCommand.NecReadRam(reg.Bank, addr, BlockSize, fwId),
-                    ScsiDirection.In, new byte[BlockSize],
-                    note: $"NEC ReadRAM 0xCC off=0x{addr:X} bank={(reg.Bank ? 1 : 0)}");
+                int requested = (int)Math.Min((uint)BlockSize, reg.End - addr);
+                var r = device.SendCommand(ScsiCommand.NecReadRam(reg.Bank, addr, (ushort)requested, fwId),
+                    ScsiDirection.In, new byte[requested],
+                    note: $"NEC ReadRAM 0xCC off=0x{addr:X} bank={(reg.Bank ? 1 : 0)} len={requested}");
                 if (!r.Good || r.Data is null)
                 {
                     stop = $"stopped at 0x{addr:X} ({r.StatusText})";
                     truncated = true;
                     break;
                 }
-                ms.Write(r.Data, 0, BlockSize);
-                foreach (byte b in r.Data) if (b != 0x00 && b != 0xFF) meaningful++;
-                done += BlockSize;
+                int got = r.TransferredLength;
+                if (got <= 0 || got > requested || got > r.Data.Length)
+                {
+                    stop = $"stopped at 0x{addr:X} (invalid transfer length {got}/{requested})";
+                    truncated = true;
+                    break;
+                }
+                ms.Write(r.Data, 0, got);
+                for (int i = 0; i < got; i++)
+                    if (r.Data[i] != 0x00 && r.Data[i] != 0xFF) meaningful++;
+                addr += (uint)got;
+                done += got;
                 progress.Report(new ExtractionProgress((int)(100L * done / Math.Max(1, total))));
             }
             if (truncated) break;

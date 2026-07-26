@@ -5,6 +5,8 @@ using FirmwareStudio.Core.Logging;
 using FirmwareStudio.Core.Models;
 using FirmwareStudio.Core.Scsi;
 
+int failures = 0;
+
 // Empirical transfer-size sweep (read-only) — run elevated: `... -- sweep [D]`. Use this to prove whether a
 // "GOOD but 0 bytes" read is a real hardware limit or a malformed request size.
 if (args.Length >= 1 && args[0].Equals("sweep", StringComparison.OrdinalIgnoreCase))
@@ -180,6 +182,7 @@ catch (FirmwareStudio.Core.Hardware.Ch341Exception ex)
 catch (Exception ex)
 {
     Console.WriteLine($"[FAIL] unexpected {ex.GetType().Name}: {ex.Message}");
+    failures++;
 }
 
 // Voltage heuristic check against known JEDEC IDs.
@@ -202,6 +205,7 @@ catch (Exception ex)
         Console.WriteLine($"   {(ok ? "ok  " : "FAIL")} {c.man:X2} {c.type:X2} -> {got}  ({c.label})");
     }
     Console.WriteLine(allOk ? "[OK]   voltage heuristic correct for known IDs" : "[FAIL] voltage heuristic wrong");
+    if (!allOk) failures++;
 }
 
 var target = drives[0];
@@ -220,7 +224,7 @@ catch (ScsiOpenException ex)
 {
     Console.WriteLine($"[WARN] {ex.Message}");
     Console.WriteLine("\n(INQUIRY / READ BUFFER need administrator rights; enumeration above still passed.)");
-    return 0;
+    return failures == 0 ? 0 : 2;
 }
 
 using (dev)
@@ -244,7 +248,9 @@ using (dev)
     {
         var desc = dev.SendCommand(ScsiCommand.ReadBufferDescriptor(b), ScsiDirection.In, new byte[4],
             note: $"READ BUFFER descriptor id={b}");
-        int cap = desc.Good && desc.Data is { Length: >= 4 } dd ? ScsiCommand.ReadBe24(dd, 1) : 0;
+        int cap = desc.Good && desc.Data is { Length: >= 4 } dd && desc.TransferredLength >= 4
+            ? ScsiCommand.ReadBe24(dd, 1)
+            : 0;
         Console.WriteLine($"   buffer {b}: {(desc.Good ? $"capacity {cap:N0} bytes" : desc.StatusText)}");
         if (firstNonEmpty is null && cap > 0) { firstNonEmpty = b; firstCap = cap; }
     }
@@ -254,10 +260,11 @@ using (dev)
         int len = Math.Min(64, firstCap);
         var read = dev.SendCommand(ScsiCommand.ReadBufferData(bid, 0, len), ScsiDirection.In, new byte[len],
             note: $"READ BUFFER data id={bid} off=0 len={len}");
-        if (read.Good && read.Data is not null)
+        if (read.Good && read.Data is not null && read.TransferredLength > 0)
         {
-            Console.WriteLine($"\nFirst {len} bytes of buffer {bid}:");
-            Console.WriteLine("   " + Convert.ToHexString(read.Data));
+            int got = Math.Min(read.TransferredLength, read.Data.Length);
+            Console.WriteLine($"\nFirst {got} bytes of buffer {bid}:");
+            Console.WriteLine("   " + Convert.ToHexString(read.Data.AsSpan(0, got)));
         }
     }
     else
@@ -323,10 +330,13 @@ using (dev)
     var files = DumpWriter.Write(binPath, synthetic, id, chip, logger.Entries, DateTime.UtcNow);
     long binLen = new FileInfo(files.BinPath).Length;
     long jsonLen = new FileInfo(files.SidecarPath).Length;
+    long logLen = files.LogPath is null ? 0 : new FileInfo(files.LogPath).Length;
     Console.WriteLine($"   wrote .bin  ({binLen:N0} bytes) → {files.BinPath}");
     Console.WriteLine($"   wrote .json ({jsonLen:N0} bytes) → {files.SidecarPath}");
-    bool ok = binLen == 4096 && jsonLen > 0;
-    Console.WriteLine(ok ? "[OK]   DumpWriter produced .bin + .json sidecar." : "[FAIL] DumpWriter output wrong.");
+    Console.WriteLine($"   wrote .log  ({logLen:N0} bytes) → {files.LogPath}");
+    bool ok = binLen == 4096 && jsonLen > 0 && logLen > 0;
+    Console.WriteLine(ok ? "[OK]   DumpWriter produced atomic .bin + .json + .log outputs." : "[FAIL] DumpWriter output wrong.");
+    if (!ok) failures++;
     try { Directory.Delete(dir, recursive: true); } catch { /* leave temp files if in use */ }
 }
 
@@ -387,7 +397,12 @@ foreach (var d in drives)
                 if (ata.Data is { Length: >= 94 } dd)
                 {
                     var sb = new System.Text.StringBuilder();
-                    for (int i = 54; i < 94; i += 2) { sb.Append((char)dd[i + 1]); sb.Append((char)dd[i]); }
+                    for (int i = 54; i < 94; i += 2)
+                    {
+                        byte first = dd[i + 1], second = dd[i];
+                        if (first is >= 0x20 and <= 0x7E) sb.Append((char)first);
+                        if (second is >= 0x20 and <= 0x7E) sb.Append((char)second);
+                    }
                     model = sb.ToString().Trim();
                 }
                 // A real IDENTIFY response has DRDY (status bit 6) set or returns a model string; an IOCTL that
@@ -410,9 +425,10 @@ foreach (var d in drives)
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"   {d.Display}: {ex.Message}");
+        Console.WriteLine($"   [FAIL] {d.Display}: {ex.Message}");
+        failures++;
     }
 }
 
 Console.WriteLine("\nSmoke test complete.");
-return 0;
+return failures == 0 ? 0 : 2;

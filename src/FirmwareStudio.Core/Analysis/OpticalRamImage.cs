@@ -127,11 +127,17 @@ public static class OpticalRamImage
     /// </summary>
     public static byte[] BuildFlat8051Image(byte[] data, CodeBankInfo bank)
     {
+        ArgumentNullException.ThrowIfNull(data);
         var img = new byte[0x10000];
+        long declaredEnd = bank.Length > 0 && bank.Offset <= long.MaxValue - bank.Length
+            ? bank.Offset + bank.Length
+            : bank.Offset;
+        long bankStart = Math.Max(0, bank.Offset);
+        long bankEnd = Math.Min(data.LongLength, declaredEnd);
         for (int r = 0; r < 0x10000; r++)
         {
             long src = bank.Offset + ((r - bank.RuntimeDelta) & 0xFFFF);
-            if (src >= 0 && src < data.Length) img[r] = data[src];
+            if (src >= bankStart && src < bankEnd) img[r] = data[src];
         }
         return img;
     }

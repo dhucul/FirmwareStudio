@@ -132,8 +132,8 @@ public static class Sweep
             Console.WriteLine($"\nAuto selected: {res.MethodId} — {res.MethodName}");
             Console.WriteLine($"success = {res.Success}   bytes = {res.ByteCount:N0}");
             Console.WriteLine($"summary = {res.Summary}");
+            return res.Success && res.ByteCount > 0 ? 0 : 2;
         }
-        return 0;
     }
 
     /// <summary>
@@ -162,14 +162,14 @@ public static class Sweep
 
             var method = new MediaTekCacheReadMethod();
             var progress = new Progress<ExtractionProgress>(p => { if (p.LogLine is not null) Console.WriteLine($"  {p.LogLine}"); });
-            var res = method.Extract(dev, id, chip, new Progress<ExtractionProgress>(), System.Threading.CancellationToken.None);
+            var res = method.Extract(dev, id, chip, progress, System.Threading.CancellationToken.None);
 
             Console.WriteLine($"success = {res.Success}");
             Console.WriteLine($"bytes   = {res.ByteCount:N0}");
             Console.WriteLine($"label   = {res.DataLabel}");
             Console.WriteLine($"summary = {res.Summary}");
+            return res.Success && res.ByteCount > 0 ? 0 : 2;
         }
-        return 0;
     }
 
     /// <summary>
@@ -188,10 +188,10 @@ public static class Sweep
         byte[] data = File.ReadAllBytes(path);
 
         // Auto-detect: a Pioneer updater vs a 0xF1 controller-RAM image vs a .1KN VPD flash image.
-        var kind = FirmwareFile.Identify(data);
-        if (kind == FirmwareFileKind.PioneerUpdate)
+        var analysis = FirmwareFile.Analyze(data);
+        if (analysis.Kind == FirmwareFileKind.PioneerUpdate)
         {
-            var pio = PioneerFirmwareImage.Parse(data);
+            var pio = analysis.Pioneer!;
             Console.WriteLine($"Pioneer firmware update: {path}\n");
             foreach (var d in pio.Diagnostics) Console.WriteLine("  " + d);
             Console.WriteLine($"\n  {pio.Describe()}\n");
@@ -211,9 +211,9 @@ public static class Sweep
             return 0;
         }
 
-        if (kind == FirmwareFileKind.ControllerRam)
+        if (analysis.Kind == FirmwareFileKind.ControllerRam)
         {
-            var ram = OpticalRamImage.Parse(data);
+            var ram = analysis.ControllerRam!;
             Console.WriteLine($"Controller-RAM image: {path}\n");
             Console.WriteLine($"  size      : {ram.Size:N0} bytes");
             Console.WriteLine($"  vendor    : {ram.Vendor}");
@@ -253,7 +253,7 @@ public static class Sweep
             return 0;
         }
 
-        var info = FirmwareImage.Parse(data);
+        var info = analysis.Vpd!;
         Console.WriteLine($"Firmware image: {path}\n");
         Console.WriteLine($"  size      : {info.Size:N0} bytes");
         Console.WriteLine($"  magic     : {info.Magic}");
@@ -280,6 +280,7 @@ public static class Sweep
     /// </summary>
     public static int Diagnose(string? driveArg)
     {
+        bool failed = false;
         Console.WriteLine("FirmwareStudio — extraction-method diagnostic (read-only)");
         Console.WriteLine("=========================================================");
         Console.WriteLine();
@@ -336,6 +337,7 @@ public static class Sweep
                     var progress = new Progress<ExtractionProgress>(p => { });
                     var res = method.Extract(dev, id, chip, progress, CancellationToken.None);
                     string status = res.Success ? "OK" : (res.Reason != null ? "N/A" : "FAIL");
+                    if (!res.Success && res.Reason is null) failed = true;
                     Console.WriteLine($"{status,-8} {res.ByteCount,8:N0} B  {res.Summary.Replace('\n', ' ').Truncate(200)}");
 
                     if (res.Success)
@@ -351,6 +353,7 @@ public static class Sweep
                 }
                 catch (Exception ex)
                 {
+                    failed = true;
                     Console.WriteLine($"{"ERROR",-8} {"-",-12} {ex.Message.Truncate(120)}");
                 }
             }
@@ -371,13 +374,15 @@ public static class Sweep
                 Console.WriteLine($"  → Selected: {autoRes.MethodId} ({autoRes.MethodName})");
                 Console.WriteLine($"  → Success: {autoRes.Success}  Bytes: {autoRes.ByteCount:N0}");
                 Console.WriteLine($"  → {autoRes.Summary.Replace('\n', ' ').Truncate(300)}");
+                if (!autoRes.Success || autoRes.ByteCount == 0) failed = true;
             }
             catch (Exception ex)
             {
+                failed = true;
                 Console.WriteLine($"  Auto failed: {ex.Message}");
             }
         }
-        return 0;
+        return failed ? 2 : 0;
     }
 
     private static string Truncate(this string s, int n) => s.Length <= n ? s : s[..(n - 3)] + "...";

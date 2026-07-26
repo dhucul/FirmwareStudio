@@ -9,23 +9,26 @@ public static class DriveIdentifier
 {
     public static DriveIdentity Identify(ScsiDevice dev, string busType)
     {
-        string vendor = "", model = "", fw = "";
         var inq = dev.SendCommand(ScsiCommand.Inquiry(96), ScsiDirection.In, new byte[96], note: "INQUIRY");
-        if (inq.Good && inq.Data is { Length: >= 36 } d)
-        {
-            vendor = Ascii(d, 8, 8);
-            model = Ascii(d, 16, 16);
-            fw = Ascii(d, 32, 4);
-        }
+        if (!inq.Good || inq.Data is null || inq.TransferredLength < 36)
+            throw new InvalidOperationException(
+                $"INQUIRY failed or returned too little data ({Math.Max(0, inq.TransferredLength)}/36 bytes): " +
+                inq.StatusText);
+
+        byte[] d = inq.Data;
+        string vendor = Ascii(d, 8, 8);
+        string model = Ascii(d, 16, 16);
+        string fw = Ascii(d, 32, 4);
         return new DriveIdentity(dev.DriveLetter, vendor, model, fw, TryReadSerial(dev), busType);
     }
 
     private static string? TryReadSerial(ScsiDevice dev)
     {
         var vpd = dev.SendCommand(ScsiCommand.InquiryVpd(0x80, 64), ScsiDirection.In, new byte[64], note: "INQUIRY VPD 0x80 (serial)");
-        if (!vpd.Good || vpd.Data is not { Length: >= 4 } d || d[1] != 0x80) return null;
+        if (!vpd.Good || vpd.Data is not { } d || vpd.TransferredLength < 4 || d[1] != 0x80) return null;
+        int available = Math.Min(vpd.TransferredLength, d.Length);
         int len = (d[2] << 8) | d[3];
-        if (len <= 0 || 4 + len > d.Length) len = Math.Max(0, d.Length - 4);
+        if (len <= 0 || 4 + len > available) len = Math.Max(0, available - 4);
         string serial = Ascii(d, 4, len);
         return string.IsNullOrWhiteSpace(serial) ? null : serial;
     }

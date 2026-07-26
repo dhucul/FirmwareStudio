@@ -19,7 +19,7 @@
 
                 <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
                     <TextBlock Text="Drive" VerticalAlignment="Center" Foreground="{StaticResource TextSecondary}" Margin="0,0,8,0" />
-                    <ComboBox x:Name="DriveCombo" Width="360">
+                    <ComboBox x:Name="DriveCombo" Width="360" SelectionChanged="OnDriveChanged">
                         <ComboBox.ItemTemplate>
                             <DataTemplate>
                                 <TextBlock Text="{Binding Display}" TextTrimming="CharacterEllipsis" />

@@ -1,14 +1,24 @@
 using System.Text.Json;
+using System.Text;
 using FirmwareStudio.Core.Hardware;
 using FirmwareStudio.Core.Logging;
 using FirmwareStudio.Core.Models;
 
 namespace FirmwareStudio.Core.Extraction;
 
-/// <summary>Writes the dumped bytes (.bin) and a JSON metadata sidecar next to it.</summary>
+/// <summary>Atomically writes dumped bytes, metadata, and the run-scoped command log.</summary>
 public static class DumpWriter
 {
-    public sealed record DumpFiles(string BinPath, string SidecarPath);
+    public sealed record DumpFiles(string BinPath, string SidecarPath, string? LogPath = null);
+
+    private sealed class PendingFile(string targetPath, Action<string> write)
+    {
+        public string TargetPath { get; } = targetPath;
+        public Action<string> Write { get; } = write;
+        public string TempPath { get; set; } = "";
+        public string? BackupPath { get; set; }
+        public bool Promoted { get; set; }
+    }
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
@@ -24,16 +34,15 @@ public static class DumpWriter
         return stem.Length == 0 ? $"firmware_{nowUtc:yyyyMMdd-HHmmss}" : stem;
     }
 
-    /// <summary>Write <paramref name="binPath"/> plus a <c>.json</c> sidecar beside it. Returns both paths.</summary>
+    /// <summary>Write <paramref name="binPath"/> plus <c>.json</c> and <c>.log</c> sidecars.</summary>
     public static DumpFiles Write(string binPath, ExtractionResult result, DriveIdentity id, ChipsetInfo chip,
         IReadOnlyList<CommandLogEntry> commands, DateTime timestampUtc)
     {
-        string? dir = Path.GetDirectoryName(binPath);
-        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-
-        File.WriteAllBytes(binPath, result.Firmware ?? Array.Empty<byte>());
-
+        byte[] firmware = result.Firmware ??
+            throw new ArgumentException("A dump cannot be saved without firmware bytes.", nameof(result));
         string sidecarPath = Path.ChangeExtension(binPath, ".json");
+        string logPath = Path.ChangeExtension(binPath, ".log");
+        EnsureDistinctPaths(binPath, sidecarPath, logPath);
         var meta = new
         {
             tool = "FirmwareStudio",
@@ -64,6 +73,7 @@ public static class DumpWriter
                 reason = result.Reason,
                 summary = result.Summary,
                 binFile = Path.GetFileName(binPath),
+                logFile = Path.GetFileName(logPath),
             },
             commands = commands.Select(c => new
             {
@@ -80,8 +90,13 @@ public static class DumpWriter
                 note = c.Note,
             }),
         };
-        File.WriteAllText(sidecarPath, JsonSerializer.Serialize(meta, JsonOptions));
-        return new DumpFiles(binPath, sidecarPath);
+        string json = JsonSerializer.Serialize(meta, JsonOptions);
+        string commandLog = BuildCommandLog(commands, timestampUtc);
+        WriteAtomically(
+            new PendingFile(binPath, p => File.WriteAllBytes(p, firmware)),
+            new PendingFile(sidecarPath, p => File.WriteAllText(p, json, Encoding.UTF8)),
+            new PendingFile(logPath, p => File.WriteAllText(p, commandLog, Encoding.UTF8)));
+        return new DumpFiles(binPath, sidecarPath, logPath);
     }
 
     /// <summary>Default filename stem for a hardware SPI dump: <c>SPI_&lt;maker&gt;_&lt;id&gt;_&lt;timestamp&gt;</c>.</summary>
@@ -99,12 +114,8 @@ public static class DumpWriter
     public static DumpFiles WriteHardware(string binPath, byte[] data, SpiFlashChip chip,
         IReadOnlyList<string> log, DateTime timestampUtc)
     {
-        string? dir = Path.GetDirectoryName(binPath);
-        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-
-        File.WriteAllBytes(binPath, data);
-
         string sidecarPath = Path.ChangeExtension(binPath, ".json");
+        EnsureDistinctPaths(binPath, sidecarPath);
         var meta = new
         {
             tool = "FirmwareStudio",
@@ -125,7 +136,99 @@ public static class DumpWriter
             binFile = Path.GetFileName(binPath),
             log,
         };
-        File.WriteAllText(sidecarPath, JsonSerializer.Serialize(meta, JsonOptions));
+        string json = JsonSerializer.Serialize(meta, JsonOptions);
+        WriteAtomically(
+            new PendingFile(binPath, p => File.WriteAllBytes(p, data)),
+            new PendingFile(sidecarPath, p => File.WriteAllText(p, json, Encoding.UTF8)));
         return new DumpFiles(binPath, sidecarPath);
+    }
+
+    private static string BuildCommandLog(IReadOnlyList<CommandLogEntry> commands, DateTime timestampUtc)
+    {
+        var text = new StringBuilder();
+        text.AppendLine($"# FirmwareStudio command log — {timestampUtc:yyyy-MM-dd HH:mm:ss}Z");
+        foreach (var entry in commands)
+            text.AppendLine($"{entry.TimestampUtc:HH:mm:ss.fff}  {entry.Text}");
+        return text.ToString();
+    }
+
+    private static void EnsureDistinctPaths(params string[] paths)
+    {
+        if (paths.Any(string.IsNullOrWhiteSpace))
+            throw new ArgumentException("Output paths cannot be empty.", nameof(paths));
+        var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string path in paths)
+            if (!unique.Add(Path.GetFullPath(path)))
+                throw new ArgumentException("The .bin, .json, and .log output paths must be distinct.");
+    }
+
+    /// <summary>
+    /// Stage every output beside its destination, then promote the complete set. Existing files are
+    /// temporarily backed up and restored if any promotion fails, so callers never receive a mixed set.
+    /// </summary>
+    private static void WriteAtomically(params PendingFile[] files)
+    {
+        try
+        {
+            foreach (var file in files)
+            {
+                string fullTarget = Path.GetFullPath(file.TargetPath);
+                string dir = Path.GetDirectoryName(fullTarget)
+                    ?? throw new ArgumentException($"Output path has no directory: {file.TargetPath}");
+                Directory.CreateDirectory(dir);
+                file.TempPath = Path.Combine(dir,
+                    $".{Path.GetFileName(fullTarget)}.{Guid.NewGuid():N}.tmp");
+                file.Write(file.TempPath);
+            }
+
+            foreach (var file in files)
+            {
+                string fullTarget = Path.GetFullPath(file.TargetPath);
+                if (File.Exists(fullTarget))
+                {
+                    file.BackupPath = Path.Combine(
+                        Path.GetDirectoryName(fullTarget)!,
+                        $".{Path.GetFileName(fullTarget)}.{Guid.NewGuid():N}.bak");
+                    File.Move(fullTarget, file.BackupPath);
+                }
+                File.Move(file.TempPath, fullTarget);
+                file.Promoted = true;
+            }
+        }
+        catch
+        {
+            for (int i = files.Length - 1; i >= 0; i--)
+            {
+                var file = files[i];
+                string fullTarget = Path.GetFullPath(file.TargetPath);
+                try
+                {
+                    if (file.Promoted && File.Exists(fullTarget))
+                        File.Delete(fullTarget);
+                    if (file.BackupPath is not null && File.Exists(file.BackupPath))
+                        File.Move(file.BackupPath, fullTarget, overwrite: true);
+                }
+                catch
+                {
+                    // Keep unwinding other files. The original exception remains the actionable failure.
+                }
+            }
+            throw;
+        }
+        finally
+        {
+            foreach (var file in files)
+            {
+                TryDelete(file.TempPath);
+                if (file.Promoted && file.BackupPath is not null)
+                    TryDelete(file.BackupPath);
+            }
+        }
+    }
+
+    private static void TryDelete(string? path)
+    {
+        if (string.IsNullOrEmpty(path)) return;
+        try { File.Delete(path); } catch { /* best-effort cleanup */ }
     }
 }

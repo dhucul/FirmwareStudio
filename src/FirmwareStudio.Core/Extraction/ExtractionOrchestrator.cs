@@ -6,10 +6,13 @@ namespace FirmwareStudio.Core.Extraction;
 /// <summary>Owns the set of extraction methods, picks one, and runs it on a background thread.</summary>
 public sealed class ExtractionOrchestrator
 {
+    private static readonly string[] PreferredAutoOrder =
+        { "nec", "mtk-flash", "mediatek", "plds" };
     private readonly IReadOnlyList<IFirmwareExtractionMethod> _methods;
 
     public ExtractionOrchestrator(IEnumerable<IFirmwareExtractionMethod>? methods = null)
-        => _methods = methods?.ToArray() ?? new IFirmwareExtractionMethod[]
+    {
+        _methods = methods?.ToArray() ?? new IFirmwareExtractionMethod[]
         {
             new UniversalReadBufferMethod(),
             new MtkFlashReadMethod(),
@@ -18,6 +21,13 @@ public sealed class ExtractionOrchestrator
             new NecRenesasReadMethod(),
             new UhdServiceModeMethod(),
         };
+        if (_methods.Count == 0)
+            throw new ArgumentException("At least one extraction method is required.", nameof(methods));
+        if (_methods.Any(m => m is null))
+            throw new ArgumentException("Extraction methods cannot contain null entries.", nameof(methods));
+        if (_methods.GroupBy(m => m.Id, StringComparer.OrdinalIgnoreCase).Any(g => g.Count() > 1))
+            throw new ArgumentException("Extraction method IDs must be unique.", nameof(methods));
+    }
 
     public IReadOnlyList<IFirmwareExtractionMethod> Methods => _methods;
 
@@ -32,13 +42,10 @@ public sealed class ExtractionOrchestrator
     /// </summary>
     public IFirmwareExtractionMethod PickAuto(DriveIdentity id, ChipsetInfo chip)
     {
-        var nec = ById("nec");
-        if (nec is not null && nec.Evaluate(id, chip).Level == Applicability.Applicable) return nec;
-        var flash = ById("mtk-flash");
-        if (flash is not null && flash.Evaluate(id, chip).Level == Applicability.Applicable) return flash;
-        var mtk = ById("mediatek");
-        if (mtk is not null && mtk.Evaluate(id, chip).Level == Applicability.Applicable) return mtk;
-        return ById("universal")!;
+        var ordered = AutoMethods().ToArray();
+        return ordered.FirstOrDefault(m => m.Evaluate(id, chip).Level == Applicability.Applicable)
+            ?? ordered.FirstOrDefault(m => m.Evaluate(id, chip).Level == Applicability.Maybe)
+            ?? ordered[0];
     }
 
     /// <summary>
@@ -52,12 +59,9 @@ public sealed class ExtractionOrchestrator
     public async Task<ExtractionResult> RunAutoAsync(ScsiDevice device, DriveIdentity id, ChipsetInfo chip,
         IProgress<ExtractionProgress> progress, CancellationToken ct)
     {
-        string[] order = { "nec", "mtk-flash", "mediatek", "plds", "universal" };
         ExtractionResult? last = null;
-        foreach (var mid in order)
+        foreach (var m in AutoMethods())
         {
-            var m = ById(mid);
-            if (m is null) continue;
             ct.ThrowIfCancellationRequested();
             progress.Report(new ExtractionProgress(0, $"Auto: trying {m.DisplayName}…",
                 $"Auto → {m.DisplayName} ({m.Evaluate(id, chip).Level})"));
@@ -71,6 +75,24 @@ public sealed class ExtractionOrchestrator
         }
         return last ?? ExtractionResult.Unsupported("auto", "Auto",
             "No extraction method returned data on this drive.");
+    }
+
+    private IEnumerable<IFirmwareExtractionMethod> AutoMethods()
+    {
+        var yielded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string id in PreferredAutoOrder)
+        {
+            var method = ById(id);
+            if (method is not null && yielded.Add(method.Id))
+                yield return method;
+        }
+        foreach (var method in _methods)
+            if (!string.Equals(method.Id, "universal", StringComparison.OrdinalIgnoreCase) &&
+                yielded.Add(method.Id))
+                yield return method;
+        var universal = ById("universal");
+        if (universal is not null && yielded.Add(universal.Id))
+            yield return universal;
     }
 
     public async Task<ExtractionResult> RunAsync(ScsiDevice device, DriveIdentity id, ChipsetInfo chip,

@@ -74,17 +74,23 @@ public static class ChipsetDetector
                     name = "MediaTek (confirmed by vendor command)";
                 conf = Math.Max(conf, 85);
             }
-            else if (probe.DeviceIoOk)
+            else if (probe.Good)
             {
-                // 0xF1 accepted (not illegal-opcode) → the drive implements the MediaTek cache read. This is the
+                // A GOOD completion proves the drive implements the MediaTek cache read. This is the
                 // functional signal (e.g. an "Optiarc" AD-5290S+ that accepts 0xF1 is a MediaTek-based drive,
                 // regardless of the vendor string). Auto no longer relies on this label anyway — RunAutoAsync
                 // picks the method that actually returns data — so this just sets an accurate display family.
-                evidence.Add($"MediaTek 0xF1 accepted (status: {probe.StatusText}) → MediaTek cache-read supported.");
+                evidence.Add("MediaTek 0xF1 completed with GOOD status → MediaTek cache-read supported.");
                 family = ChipsetFamily.MediaTek;
                 if (name.StartsWith("MediaTek", StringComparison.OrdinalIgnoreCase) == false)
                     name = "MediaTek (confirmed by vendor command)";
                 conf = Math.Max(conf, 92);
+            }
+            else if (probe.DeviceIoOk)
+            {
+                // BUSY / NOT READY / UNIT ATTENTION / hardware errors can be raised before the CDB is decoded,
+                // so they do not prove that the vendor opcode exists.
+                evidence.Add($"MediaTek 0xF1 probe was inconclusive ({probe.StatusText}); leaving table result.");
             }
             else
             {
