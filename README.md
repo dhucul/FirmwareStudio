@@ -37,7 +37,7 @@ on the drive's chipset, and many drives expose nothing useful over software:
 Bottom line: a true, byte-exact firmware-ROM backup often requires a **hardware SPI/flash programmer**.
 FirmwareStudio surfaces this instead of pretending otherwise, and labels every dump honestly.
 
-## Extraction methods (v1)
+## Extraction methods
 
 **Software (SCSI) — the "Optical drive" tab:**
 
@@ -120,30 +120,61 @@ src/FirmwareStudio.Core   — logic + SCSI interop (net10.0, x64)
   Logging/     IScsiLogger, CommandLogEntry, FileAndMemoryLogger
 src/FirmwareStudio.Wpf    — GUI (net10.0-windows, WinExe, requires admin)
 tools/FirmwareStudio.Smoke — headless self-test console
+tests/FirmwareStudio.Core.Tests — xUnit regression tests for parsing, extraction, and dump output
+installer/                — Inno Setup definition for the self-contained Windows installer
 ```
 
 The SCSI layer is a C# P/Invoke port of the pass-through code in the native OptiScan project.
 
+## Requirements
+
+- 64-bit Windows. Live extraction also requires an optical drive accessible through Windows SCSI
+  pass-through; firmware-file analysis can be used without a drive.
+- Administrator privileges for drive identification and extraction. Firmware-file analysis does not
+  require a connected drive.
+- The .NET 10 SDK when building from source. The packaged installer is self-contained and does not
+  require a separate .NET runtime.
+- For direct SPI reads, a CH341A adapter, a 3.3 V-safe connection, and the 64-bit WCH CH341PAR DLL and
+  driver described in [`src/FirmwareStudio.Wpf/third_party/README.md`](src/FirmwareStudio.Wpf/third_party/README.md).
+
 ## Build & run
 
-```
+Clone the repository, then build the solution:
+
+```powershell
+git clone https://github.com/dhucul/FirmwareStudio.git
+cd FirmwareStudio
 dotnet build FirmwareStudio.slnx -c Debug
 ```
 
 Run the GUI **as administrator** (SCSI pass-through needs elevation; the manifest forces the UAC prompt):
 
-```
+```powershell
 src/FirmwareStudio.Wpf/bin/Debug/net10.0-windows/FirmwareStudio.exe
 ```
 
 In the app: pick a drive → **Identify** (shows vendor/model/firmware/serial/bus + detected chipset and
 which methods apply) → choose a method (or Auto) → **Extract firmware** → **Save dump…**. Every SCSI
 command is shown in the command-log pane; the hex pane previews the dump. Saving writes `<stem>.bin`,
-a `<stem>.json` metadata sidecar, and a `<stem>.log` command log.
+a `<stem>.json` metadata sidecar, and a `<stem>.log` command log as one atomic output set.
+
+### Build the installer
+
+The helper script publishes a self-contained `win-x64` build and invokes Inno Setup 6. Keep the version
+in `src/FirmwareStudio.Wpf/FirmwareStudio.Wpf.csproj` and `installer/FirmwareStudio.iss` in sync.
+
+```powershell
+.\build-installer.ps1
+```
+
+The installer is written to `installer/Output/`.
 
 ## Verification
 
-```
+```powershell
+# Unit tests; no optical drive or administrator privileges required.
+dotnet test tests/FirmwareStudio.Core.Tests -c Debug
+
 # Elevated console self-test: struct-layout ABI, enumeration, INQUIRY, chipset, READ BUFFER walk,
 # MediaTek cache sample, orchestrator + DumpWriter round-trip.
 dotnet run --project tools/FirmwareStudio.Smoke
