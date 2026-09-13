@@ -9,7 +9,9 @@
 #define MyAppPublisher "David Hucul"
 #define MyAppExe "FirmwareStudio.exe"
 #define MyAppIcon "..\src\FirmwareStudio.Wpf\FirmwareStudio.ico"
+#ifndef PublishDir
 #define PublishDir "..\src\FirmwareStudio.Wpf\bin\Release\net10.0-windows\win-x64\publish"
+#endif
 
 [Setup]
 AppId={{B7F1C2A4-9E3D-4C5A-8B6E-FW0DR1VE0001}

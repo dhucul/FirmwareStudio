@@ -38,8 +38,9 @@ public static class ChipsetDetector
         new("PLEXTOR",  "",     ChipsetFamily.Other,    "Plextor (custom or MediaTek OEM)", 50),
     };
 
-    public static ChipsetInfo Detect(ScsiDevice dev, DriveIdentity id)
+    public static ChipsetInfo Detect(IScsiDevice dev, DriveIdentity id, CancellationToken ct = default)
     {
+        dev = dev.WithCancellation(ct);
         var evidence = new List<string>();
         var (family, name, conf) = FromTable(id.Vendor, id.Model);
         evidence.Add(family == ChipsetFamily.Unknown
@@ -97,7 +98,7 @@ public static class ChipsetDetector
                 evidence.Add("MediaTek 0xF1 probe could not be issued; leaving table result.");
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             evidence.Add($"MediaTek probe skipped: {ex.Message}");
         }

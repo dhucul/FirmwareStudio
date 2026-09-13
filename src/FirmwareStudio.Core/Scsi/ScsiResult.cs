@@ -25,11 +25,14 @@ public sealed class ScsiResult
     /// The drive understood and accepted the command: GOOD, or CHECK CONDITION with sense key
     /// NO&#160;SENSE / RECOVERED (&lt;= 1). An illegal opcode returns key 0x05 and is NOT accepted.
     /// </summary>
-    public bool Accepted => DeviceIoOk && (ScsiStatus == 0x00 || SenseInfo.Key <= 0x01);
+    public bool Accepted => DeviceIoOk && (ScsiStatus == 0x00 || (ScsiStatus == 0x02 && SenseInfo.Present && SenseInfo.Key <= 0x01));
+
+    public bool ValidTransferLength => TransferredLength >= 0 &&
+        TransferredLength <= RequestedLength && TransferredLength <= (Data?.Length ?? 0);
 
     public string CdbHex => Convert.ToHexString(Cdb).Chunk2();
 
-    public string StatusText => ScsiStatus switch
+    public string StatusText => !DeviceIoOk ? $"IOCTL FAILED win32={Win32Error}" : ScsiStatus switch
     {
         0x00 => "GOOD",
         0x02 => $"CHECK CONDITION sk={SenseInfo.Key:X2} {SenseInfo.Describe()}",

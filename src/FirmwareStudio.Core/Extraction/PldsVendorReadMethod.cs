@@ -78,9 +78,10 @@ public sealed class PldsVendorReadMethod : IFirmwareExtractionMethod
         return MethodApplicability.No($"Detected {chipset.Family}; 0xDF targets PLDS/Lite-On (MediaTek) drives.");
     }
 
-    public ExtractionResult Extract(ScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
+    public ExtractionResult Extract(IScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
         IProgress<ExtractionProgress> progress, CancellationToken ct)
     {
+        device = device.WithCancellation(ct);
         progress.Report(new ExtractionProgress(0, "PLDS vendor read (0xDF) — probe phase"));
 
         // 1. Support probe = the updater's exact 12-byte drive-state read. Distinguish a genuinely-absent
@@ -95,15 +96,19 @@ public sealed class PldsVendorReadMethod : IFirmwareExtractionMethod
                 "The drive rejected the PLDS 0xDF vendor command (INVALID COMMAND OPERATION CODE, asc=20). " +
                 "It does not implement 0xDF — not a PLDS/Lite-On (MediaTek) vendor-command drive.");
         if (!probe.DeviceIoOk)
-            return ExtractionResult.Unsupported(Id, DisplayName,
+            return ExtractionResult.Failed(Id, DisplayName,
                 $"Could not issue the 0xDF vendor command ({probe.StatusText}).");
         if (!probe.Good && !s.FieldInvalid)
-            return ExtractionResult.Unsupported(Id, DisplayName,
+            return ExtractionResult.Failed(Id, DisplayName,
                 $"The 0xDF support probe was inconclusive ({probe.StatusText}); the broad buffer sweep was " +
                 "not attempted. Retry after the drive is ready.");
 
         // 2. PHASE 1 — quick probe of every (bufferId, arg3) combination.
         var discovered = new List<Slot>();
+        if (probe.Good && probe.ValidTransferLength && probe.TransferredLength > 0 && probe.Data is not null &&
+            CountNonZero(probe.Data, probe.TransferredLength) > 0)
+            discovered.Add(new Slot(StateBufferId, 0x20, probe.Data[..probe.TransferredLength],
+                CountNonZero(probe.Data, probe.TransferredLength)));
         int totalSlots = (MaxBufferId + 1) * Arg3Values.Length;
         int probed = 0;
         foreach (byte bufId in Enumerable.Range(0, MaxBufferId + 1).Select(i => (byte)i))
@@ -123,7 +128,9 @@ public sealed class PldsVendorReadMethod : IFirmwareExtractionMethod
                 long nz = CountNonZero(r.Data, len);
                 if (nz > 0)
                 {
-                    discovered.Add(new Slot(bufId, arg3, r.Data[..len], nz));
+                    int prior = discovered.FindIndex(x => x.BufferId == bufId && x.Arg3 == arg3);
+                    if (prior < 0) discovered.Add(new Slot(bufId, arg3, r.Data[..len], nz));
+                    else if (len > discovered[prior].Data.Length) discovered[prior] = new Slot(bufId, arg3, r.Data[..len], nz);
                     progress.Report(new ExtractionProgress(0, null,
                         $"  → buf=0x{bufId:X2} arg3=0x{arg3:X2}: {len}B, {nz}nz — discovered"));
                 }
@@ -147,23 +154,26 @@ public sealed class PldsVendorReadMethod : IFirmwareExtractionMethod
         {
             ct.ThrowIfCancellationRequested();
             var slot = discovered[si];
-            var r = device.SendCommand(ScsiCommand.PldsVendor(ReadMode, slot.BufferId, slot.Arg3),
-                ScsiDirection.In, new byte[MaxPerSlot],
-                note: $"PLDS 0xDF deep buf=0x{slot.BufferId:X2} arg3=0x{slot.Arg3:X2} len={MaxPerSlot}");
-
-            if (!r.Good || r.Data is null) continue;
-            int got = r.TransferredLength;
-            if (got <= 0 || got > MaxPerSlot || got > r.Data.Length) continue;
-
-            // Preserve the complete transferred span. Zero-filled tails can be part of a valid RAM layout.
-            int keep = got;
-
-            long nz = CountNonZero(r.Data, keep);
-            if (nz > 0)
-                deepResults.Add(new Slot(slot.BufferId, slot.Arg3, r.Data[..keep], nz));
-
+            Slot best = slot;
+            foreach (int requested in new[] { MaxPerSlot, 0x4000, 0x1000, ProbeLen })
+            {
+                var r = device.SendCommand(ScsiCommand.PldsVendor(ReadMode, slot.BufferId, slot.Arg3),
+                    ScsiDirection.In, new byte[requested], note: $"PLDS read {slot.Label} length={requested}");
+                if (!r.Good || !r.ValidTransferLength || r.Data is null || r.TransferredLength == 0)
+                {
+                    progress.Report(new ExtractionProgress(0, null, $"{slot.Label}: " +
+                        (!r.Good ? r.StatusText : $"invalid/empty transfer {r.TransferredLength}/{requested}")));
+                    continue;
+                }
+                int got = r.TransferredLength;
+                long nz = CountNonZero(r.Data, got);
+                if (nz > 0 && got >= best.Data.Length)
+                    best = new Slot(slot.BufferId, slot.Arg3, r.Data[..got], nz);
+                if (nz > 0) break;
+            }
+            deepResults.Add(best);
             progress.Report(new ExtractionProgress(50 + (int)(49L * (si + 1) / discovered.Count),
-                null, $"Slot {si + 1}/{discovered.Count}: buf=0x{slot.BufferId:X2} arg3=0x{slot.Arg3:X2} → {keep}B, {nz}nz"));
+                null, $"Retained {best.Data.Length} bytes from {best.Label}."));
         }
 
         if (deepResults.Count == 0)
@@ -181,8 +191,9 @@ public sealed class PldsVendorReadMethod : IFirmwareExtractionMethod
             ? $"PLDS 0xDF vendor-buffer contents — {deepResults[0].Label}"
             : $"PLDS 0xDF composite vendor dump — {deepResults.Count} responsive slots";
 
-        return ExtractionResult.Ok(Id, DisplayName, composite, label,
-            $"0xDF accepted; {discovered.Count} slots found in probe, {deepResults.Count} with real data after deep read.\n" +
+        ct.ThrowIfCancellationRequested();
+        return ExtractionResult.Partial(Id, DisplayName, composite, label,
+            $"0xDF accepted; {discovered.Count} slots found; retained the best response for all {deepResults.Count}. Slot capacities are unknown.\n" +
             $"  Slots:\n  {sections}\n" +
             $"  Total composite dump: {composite.Length:N0} bytes ({100.0 * totalNz / Math.Max(1, composite.Length):F1}% non-zero). " +
             "Each region is prefixed with a 128-byte ASCII header identifying the buffer/arg3 source.");
@@ -204,8 +215,8 @@ public sealed class PldsVendorReadMethod : IFirmwareExtractionMethod
 
         foreach (var slot in slots)
         {
-            string header = $"=== {slot.Label} ===  size={slot.Data.Length}  non-zero={slot.NonZero}" +
-                            $"  ({100.0 * slot.NonZero / Math.Max(1, slot.Data.Length):F1}%)".PadRight(127) + "\n";
+            string header = ($"=== {slot.Label} ===  size={slot.Data.Length}  non-zero={slot.NonZero}" +
+                             $"  ({100.0 * slot.NonZero / Math.Max(1, slot.Data.Length):F1}%)").PadRight(127) + "\n";
             byte[] hdr = Encoding.ASCII.GetBytes(header[..Math.Min(header.Length, 128)]);
             // Pad to exactly 128 bytes
             var padded = new byte[128];

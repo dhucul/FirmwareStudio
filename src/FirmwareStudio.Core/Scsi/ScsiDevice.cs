@@ -8,7 +8,7 @@ namespace FirmwareStudio.Core.Scsi;
 /// <see cref="SendCommand"/>, which marshals the SPTD block, issues the IOCTL, decodes status/sense,
 /// and reports the command to the logger. The instance is not thread-safe; use one drive per worker.
 /// </summary>
-public sealed class ScsiDevice : IDisposable
+public sealed class ScsiDevice : IScsiDevice, IDisposable
 {
     private readonly IntPtr _handle;
     private readonly IScsiLogger _logger;
@@ -38,8 +38,12 @@ public sealed class ScsiDevice : IDisposable
         if (h == Native.INVALID_HANDLE_VALUE)
             throw new ScsiOpenException(driveLetter, Marshal.GetLastWin32Error());
 
-        logger.Info($"Opened drive {char.ToUpperInvariant(driveLetter)}: for pass-through.");
-        return new ScsiDevice(h, driveLetter, logger);
+        try
+        {
+            logger.Info($"Opened drive {char.ToUpperInvariant(driveLetter)}: for pass-through.");
+            return new ScsiDevice(h, driveLetter, logger);
+        }
+        catch { Native.CloseHandle(h); throw; }
     }
 
     /// <summary>
@@ -65,6 +69,8 @@ public sealed class ScsiDevice : IDisposable
             _logger.Info($"WARNING: data-in transfer of {dataBuf.Length:N0} bytes exceeds the 16-bit ATAPI " +
                          "limit (0xFFFE); the drive will likely return 0 bytes. Chunk the read below 0xFFFF.");
 
+        _logger.Info($"Issuing {Convert.ToHexString(cdb)} | {dir} req={dataBuf.Length}" +
+                     (note is null ? "" : $" [{note}]"));
         var block = new Native.SCSI_PASS_THROUGH_DIRECT_WITH_SENSE
         {
             Sptd = new Native.SCSI_PASS_THROUGH_DIRECT
@@ -111,7 +117,7 @@ public sealed class ScsiDevice : IDisposable
             var outBlock = Marshal.PtrToStructure<Native.SCSI_PASS_THROUGH_DIRECT_WITH_SENSE>(p);
             status = outBlock.Sptd.ScsiStatus;
             sense = outBlock.Sense ?? new byte[32];
-            transferred = outBlock.Sptd.DataTransferLength;
+            transferred = ioOk ? outBlock.Sptd.DataTransferLength : 0;
         }
         finally
         {

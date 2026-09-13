@@ -23,15 +23,15 @@ public sealed class DumpAnalysis
     public string Verdict()
     {
         if (NonZero == 0)
-            return $"All {Size:N0} bytes are zero — nothing was captured (empty/idle controller RAM or unsupported read).";
+            return $"All {Size:N0} captured bytes are zero; the contents alone do not establish whether firmware is exposed.";
 
         var sb = new StringBuilder();
         sb.Append($"{NonZero:N0} of {Size:N0} bytes non-zero ({NonZeroPercent:F1}%).");
         if (RepeatPeriod is int p)
-            sb.Append($" Content repeats every {p:N0} bytes — the true unique data is ~{p / 1024} KiB, mirrored {Size / p}× across this dump.");
+            sb.Append($" The captured span repeats exactly every {p:N0} bytes; all copies remain preserved.");
         int firmwareHits = Strings.Count(s => LooksLikeFirmware(s.Text));
         if (firmwareHits > 0)
-            sb.Append($" Contains {Strings.Count} readable strings incl. firmware/config markers — this is real firmware content, not blank cache.");
+            sb.Append($" Contains {Strings.Count} readable strings including possible firmware/config markers; these strings alone do not prove firmware provenance.");
         else if (Strings.Count > 0)
             sb.Append($" Contains {Strings.Count} readable strings.");
         return sb.ToString();
@@ -57,15 +57,21 @@ public static class DumpAnalyzer
 {
     private const int RegionSize = 256 * 1024;
 
-    public static DumpAnalysis Analyze(byte[] data, int maxStrings = 80, int minStringLen = 5)
+    public static DumpAnalysis Analyze(byte[] data, int maxStrings = 80, int minStringLen = 5, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         long nonZero = 0;
-        foreach (byte b in data) if (b != 0) nonZero++;
+        for (int i = 0; i < data.Length; i++)
+        {
+            if ((i & 0xFFFF) == 0) ct.ThrowIfCancellationRequested();
+            if (data[i] != 0) nonZero++;
+        }
 
         // Region map (256 KiB granularity), only slices that carry data.
         var regions = new List<DumpRegion>();
         for (int r = 0; r < data.Length; r += RegionSize)
         {
+            ct.ThrowIfCancellationRequested();
             int end = Math.Min(r + RegionSize, data.Length);
             long c = 0;
             for (int i = r; i < end; i++) if (data[i] != 0) c++;
@@ -78,6 +84,7 @@ public static class DumpAnalyzer
         int start = 0;
         for (int i = 0; i <= data.Length && strings.Count < maxStrings; i++)
         {
+            if ((i & 0xFFFF) == 0) ct.ThrowIfCancellationRequested();
             int c = i < data.Length ? data[i] : 0;
             if (c is >= 32 and < 127) { if (sb.Length == 0) start = i; sb.Append((char)c); }
             else
@@ -91,36 +98,29 @@ public static class DumpAnalyzer
         {
             Size = data.Length,
             NonZero = nonZero,
-            RepeatPeriod = DetectRepeatPeriod(data, nonZero),
+            RepeatPeriod = DetectRepeatPeriod(data, nonZero, ct),
             Regions = regions,
             Strings = strings,
         };
     }
 
     /// <summary>
-    /// Find the smallest power-of-two-ish period P (256 KiB … half the image) at which the dump mirrors itself.
-    /// Comparing raw bytes would be fooled by the sea of zeros (any period "matches" ~95% of the time), so we
-    /// score only positions where at least one side is non-zero. A live/volatile cache drifts slightly between
-    /// reads, so the threshold is lenient (80%). Returns null if nothing repeats.
+    /// Find an exact period in the captured bytes. This is descriptive only: all raw bytes are retained.
     /// </summary>
-    private static int? DetectRepeatPeriod(byte[] data, long nonZero)
+    private static int? DetectRepeatPeriod(byte[] data, long nonZero, CancellationToken ct)
     {
         if (nonZero == 0 || data.Length < 2 * RegionSize) return null;
 
         foreach (int period in new[] { 0x40000, 0x80000, 0x100000, 0x200000, 0x400000 })
         {
             if (period * 2 > data.Length) break;
-            long considered = 0, matches = 0;
-            int stride = Math.Max(1, (data.Length - period) / 200_000);   // bound the work
-            for (int i = 0; i + period < data.Length; i += stride)
+            bool equal = true;
+            for (int i = 0; i + period < data.Length; i++)
             {
-                byte a = data[i], b = data[i + period];
-                if (a == 0 && b == 0) continue;   // ignore the zero-sea
-                considered++;
-                if (a == b) matches++;
+                if ((i & 0xFFFF) == 0) ct.ThrowIfCancellationRequested();
+                if (data[i] != data[i + period]) { equal = false; break; }
             }
-            if (considered >= 1000 && (double)matches / considered >= 0.80)
-                return period;
+            if (equal) return period;
         }
         return null;
     }

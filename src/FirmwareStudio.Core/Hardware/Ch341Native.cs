@@ -12,13 +12,16 @@ internal static class Ch341Native
 {
     // Logical name resolved by the import resolver below to the real DLL.
     private const string Lib = "CH341";
-    private static int _resolverSet;
+    private static readonly Lazy<bool> Resolver = new(() =>
+    {
+        NativeLibrary.SetDllImportResolver(typeof(Ch341Native).Assembly, Resolve);
+        return true;
+    }, LazyThreadSafetyMode.ExecutionAndPublication);
 
     /// <summary>Register the DLL resolver once, before the first CH341 call.</summary>
     internal static void EnsureResolver()
     {
-        if (Interlocked.Exchange(ref _resolverSet, 1) == 0)
-            NativeLibrary.SetDllImportResolver(typeof(Ch341Native).Assembly, Resolve);
+        _ = Resolver.Value;
     }
 
     private static IntPtr Resolve(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)

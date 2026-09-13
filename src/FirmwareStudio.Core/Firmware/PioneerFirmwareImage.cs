@@ -84,22 +84,11 @@ public static class PioneerFirmwareImage
         => data.Length >= HeaderSize && data.AsSpan(0, Signature.Length).SequenceEqual(Signature);
 
     /// <summary>Cheap-ish detector for <see cref="FirmwareFile.Identify"/>: raw image, PE with BINARY images, or a Pioneer SFX.</summary>
-    public static bool Looks(byte[] data)
-    {
-        if (LooksLikeImage(data)) return true;
-        if (!PeResourceReader.IsPe(data)) return false;
-        if (HasPioneerBinaryResource(data)) return true;
-        // Only pay for the SFX inflate when the file actually looks like a WinRAR SFX.
-        if (ZipSfxExtractor.LooksLikeWinRarSfx(data))
-        {
-            var inner = ZipSfxExtractor.ExtractInnerExe(data);
-            if (inner is not null && HasPioneerBinaryResource(inner)) return true;
-        }
-        return false;
-    }
+    public static bool Looks(byte[] data) => Parse(data).Parts.Count > 0;
 
-    public static PioneerUpdateInfo Parse(byte[] data)
+    public static PioneerUpdateInfo Parse(byte[] data, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         var diag = new List<string>();
 
         // 1) Raw image.
@@ -123,21 +112,24 @@ public static class PioneerFirmwareImage
         // 2) PE — walk resources; if none are Pioneer, try unwrapping a WinRAR SFX first.
         string kind = "Updater.exe (PE)";
         byte[] pe = data;
-        var res = PeResourceReader.Read(pe);
+        var res = PeResourceReader.Read(pe, ct);
         if (!res.Any(r => LooksLikeImage(r.Data)))
         {
             bool isSfx = ZipSfxExtractor.LooksLikeWinRarSfx(data);
             diag.Add(isSfx
                 ? "Detected: WinRAR SFX with no outer firmware resources — probing its inner .exe ..."
                 : "Detected: PE with no Pioneer firmware resources.");
-            var inner = isSfx ? ZipSfxExtractor.ExtractInnerExe(data) : null;
-            if (inner is not null)
-            {
-                diag.Add($"        unwrapped inner PE ({inner.Length:N0} bytes)");
-                kind = "WinRAR SFX";
-                pe = inner;
-                res = PeResourceReader.Read(pe);
-            }
+            if (isSfx)
+                foreach (var inner in ZipSfxExtractor.ExtractInnerExes(data, ct))
+                {
+                    var candidates = PeResourceReader.Read(inner, ct);
+                    if (!candidates.Any(r => LooksLikeImage(r.Data))) continue;
+                    diag.Add($"        unwrapped firmware-bearing PE ({inner.Length:N0} bytes)");
+                    kind = "WinRAR SFX";
+                    pe = inner;
+                    res = candidates;
+                    break;
+                }
         }
 
         int pioneer = res.Count(r => LooksLikeImage(r.Data));
@@ -148,6 +140,7 @@ public static class PioneerFirmwareImage
         var parts = new List<PioneerImagePart>();
         foreach (var r in res)
         {
+            ct.ThrowIfCancellationRequested();
             if (!LooksLikeImage(r.Data)) continue;
             string src = $"resource {r.Type}/{r.Name} lang=0x{r.Lang:X}";
             parts.Add(ParsePart(r.Data, src, r.Type, int.TryParse(r.Name, out int id) ? id : 0, r.Lang));
@@ -155,9 +148,6 @@ public static class PioneerFirmwareImage
 
         return new PioneerUpdateInfo { DetectedKind = kind, Diagnostics = diag, Parts = parts };
     }
-
-    private static bool HasPioneerBinaryResource(byte[] pe)
-        => PeResourceReader.Read(pe).Any(r => LooksLikeImage(r.Data));
 
     private static PioneerImagePart ParsePart(byte[] raw, string source, string? resType, int resId, int resLang)
     {

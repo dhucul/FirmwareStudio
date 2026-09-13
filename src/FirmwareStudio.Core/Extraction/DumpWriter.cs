@@ -6,7 +6,7 @@ using FirmwareStudio.Core.Models;
 
 namespace FirmwareStudio.Core.Extraction;
 
-/// <summary>Atomically writes dumped bytes, metadata, and the run-scoped command log.</summary>
+/// <summary>Stages output files and uses best-effort rollback, preserving backups if recovery fails.</summary>
 public static class DumpWriter
 {
     public sealed record DumpFiles(string BinPath, string SidecarPath, string? LogPath = null);
@@ -37,6 +37,10 @@ public static class DumpWriter
     /// <summary>Write <paramref name="binPath"/> plus <c>.json</c> and <c>.log</c> sidecars.</summary>
     public static DumpFiles Write(string binPath, ExtractionResult result, DriveIdentity id, ChipsetInfo chip,
         IReadOnlyList<CommandLogEntry> commands, DateTime timestampUtc)
+        => Write(binPath, result, id, chip, commands, timestampUtc, new FilePromotion());
+
+    internal static DumpFiles Write(string binPath, ExtractionResult result, DriveIdentity id, ChipsetInfo chip,
+        IReadOnlyList<CommandLogEntry> commands, DateTime timestampUtc, IFilePromotion fileSystem)
     {
         byte[] firmware = result.Firmware ??
             throw new ArgumentException("A dump cannot be saved without firmware bytes.", nameof(result));
@@ -68,6 +72,8 @@ public static class DumpWriter
                 methodId = result.MethodId,
                 methodName = result.MethodName,
                 success = result.Success,
+                status = result.Status.ToString(),
+                complete = result.IsComplete,
                 dataLabel = result.DataLabel,
                 byteCount = result.ByteCount,
                 reason = result.Reason,
@@ -87,12 +93,14 @@ public static class DumpWriter
                 asc = $"0x{c.Asc:X2}",
                 ascq = $"0x{c.Ascq:X2}",
                 status = c.StatusText,
+                deviceIoOk = c.DeviceIoOk,
+                win32Error = c.Win32Error,
                 note = c.Note,
             }),
         };
         string json = JsonSerializer.Serialize(meta, JsonOptions);
         string commandLog = BuildCommandLog(commands, timestampUtc);
-        WriteAtomically(
+        WriteAtomically(fileSystem,
             new PendingFile(binPath, p => File.WriteAllBytes(p, firmware)),
             new PendingFile(sidecarPath, p => File.WriteAllText(p, json, Encoding.UTF8)),
             new PendingFile(logPath, p => File.WriteAllText(p, commandLog, Encoding.UTF8)));
@@ -137,7 +145,7 @@ public static class DumpWriter
             log,
         };
         string json = JsonSerializer.Serialize(meta, JsonOptions);
-        WriteAtomically(
+        WriteAtomically(new FilePromotion(),
             new PendingFile(binPath, p => File.WriteAllBytes(p, data)),
             new PendingFile(sidecarPath, p => File.WriteAllText(p, json, Encoding.UTF8)));
         return new DumpFiles(binPath, sidecarPath);
@@ -164,10 +172,12 @@ public static class DumpWriter
 
     /// <summary>
     /// Stage every output beside its destination, then promote the complete set. Existing files are
-    /// temporarily backed up and restored if any promotion fails, so callers never receive a mixed set.
+    /// temporarily backed up and restored if promotion fails. Backups survive recovery failures.
+    /// Multiple file moves are not a crash-atomic transaction.
     /// </summary>
-    private static void WriteAtomically(params PendingFile[] files)
+    private static void WriteAtomically(IFilePromotion fs, params PendingFile[] files)
     {
+        bool committed = false;
         try
         {
             foreach (var file in files)
@@ -184,34 +194,43 @@ public static class DumpWriter
             foreach (var file in files)
             {
                 string fullTarget = Path.GetFullPath(file.TargetPath);
-                if (File.Exists(fullTarget))
+                if (fs.Exists(fullTarget))
                 {
                     file.BackupPath = Path.Combine(
                         Path.GetDirectoryName(fullTarget)!,
                         $".{Path.GetFileName(fullTarget)}.{Guid.NewGuid():N}.bak");
-                    File.Move(fullTarget, file.BackupPath);
+                    fs.Move(fullTarget, file.BackupPath);
                 }
-                File.Move(file.TempPath, fullTarget);
+                fs.Move(file.TempPath, fullTarget);
                 file.Promoted = true;
             }
+            committed = true;
         }
-        catch
+        catch (Exception original)
         {
+            var recoveryErrors = new List<Exception>();
             for (int i = files.Length - 1; i >= 0; i--)
             {
                 var file = files[i];
                 string fullTarget = Path.GetFullPath(file.TargetPath);
                 try
                 {
-                    if (file.Promoted && File.Exists(fullTarget))
-                        File.Delete(fullTarget);
-                    if (file.BackupPath is not null && File.Exists(file.BackupPath))
-                        File.Move(file.BackupPath, fullTarget, overwrite: true);
+                    if (file.Promoted && fs.Exists(fullTarget))
+                        fs.Delete(fullTarget);
+                    if (file.BackupPath is not null && fs.Exists(file.BackupPath))
+                        fs.Move(file.BackupPath, fullTarget, overwrite: true);
                 }
-                catch
+                catch (Exception recoveryError)
                 {
-                    // Keep unwinding other files. The original exception remains the actionable failure.
+                    recoveryErrors.Add(recoveryError);
                 }
+            }
+            if (recoveryErrors.Count > 0)
+            {
+                string backups = string.Join(", ", files.Where(f => f.BackupPath is not null && fs.Exists(f.BackupPath))
+                    .Select(f => f.BackupPath));
+                throw new IOException($"Save failed and recovery was incomplete. Preserved backups: {backups}",
+                    new AggregateException(new[] { original }.Concat(recoveryErrors)));
             }
             throw;
         }
@@ -220,7 +239,7 @@ public static class DumpWriter
             foreach (var file in files)
             {
                 TryDelete(file.TempPath);
-                if (file.Promoted && file.BackupPath is not null)
+                if (committed && file.BackupPath is not null)
                     TryDelete(file.BackupPath);
             }
         }

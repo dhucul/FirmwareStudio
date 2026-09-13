@@ -20,7 +20,7 @@ if (args.Length >= 1 && args[0].Equals("analyze", StringComparison.OrdinalIgnore
 if (args.Length >= 1 && args[0].Equals("fwfile", StringComparison.OrdinalIgnoreCase))
     return FirmwareStudio.Smoke.Sweep.Firmware(args.Length >= 2 ? args[1] : null);
 
-// Run the real 0xF1 cache extraction (verifies the de-mirror trim on live hardware): `... -- cache [D]`.
+// Run the real 0xF1 cache extraction (verifies raw capture preservation on live hardware): `... -- cache [D]`.
 if (args.Length >= 1 && args[0].Equals("cache", StringComparison.OrdinalIgnoreCase))
     return FirmwareStudio.Smoke.Sweep.CacheRead(args.Length >= 2 ? args[1] : null);
 
@@ -160,11 +160,6 @@ if (layout is not null) return 2;
 var drives = DriveEnumerator.Scan();
 Console.WriteLine($"[OK]   Optical drives found: {drives.Count}");
 foreach (var d in drives) Console.WriteLine($"         {d.Display}");
-if (drives.Count == 0)
-{
-    Console.WriteLine("\nNo optical drives present — enumeration works, nothing to probe.");
-    return 0;
-}
 
 // Hardware SPI (CH341) path — expected to report "no adapter/DLL" cleanly in this environment.
 Console.WriteLine("\nHardware SPI (CH341) check:");
@@ -206,6 +201,12 @@ catch (Exception ex)
     }
     Console.WriteLine(allOk ? "[OK]   voltage heuristic correct for known IDs" : "[FAIL] voltage heuristic wrong");
     if (!allOk) failures++;
+}
+
+if (drives.Count == 0)
+{
+    Console.WriteLine("No optical drives present; optical probes skipped.");
+    return failures == 0 ? 0 : 2;
 }
 
 var target = drives[0];
@@ -316,7 +317,7 @@ using (dev)
     // 7. Orchestrator wrapper + DumpWriter file round-trip.
     Console.WriteLine("\nOrchestrator + DumpWriter check:");
     var orch = new ExtractionOrchestrator();
-    var progress = new Progress<ExtractionProgress>(p => { if (p.LogLine is not null) Console.WriteLine($"      {p.LogLine}"); });
+    var progress = new FirmwareStudio.Smoke.InlineProgress<ExtractionProgress>(p => { if (p.LogLine is not null) Console.WriteLine($"      {p.LogLine}"); });
     var universal = orch.ById("universal")!;
     var res = await orch.RunAsync(dev, id, chip, universal, progress, System.Threading.CancellationToken.None);
     Console.WriteLine($"   universal → success={res.Success}: {res.Summary}");
@@ -335,7 +336,7 @@ using (dev)
     Console.WriteLine($"   wrote .json ({jsonLen:N0} bytes) → {files.SidecarPath}");
     Console.WriteLine($"   wrote .log  ({logLen:N0} bytes) → {files.LogPath}");
     bool ok = binLen == 4096 && jsonLen > 0 && logLen > 0;
-    Console.WriteLine(ok ? "[OK]   DumpWriter produced atomic .bin + .json + .log outputs." : "[FAIL] DumpWriter output wrong.");
+    Console.WriteLine(ok ? "[OK]   DumpWriter produced staged .bin + .json + .log outputs." : "[FAIL] DumpWriter output wrong.");
     if (!ok) failures++;
     try { Directory.Delete(dir, recursive: true); } catch { /* leave temp files if in use */ }
 }

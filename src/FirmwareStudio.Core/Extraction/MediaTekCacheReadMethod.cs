@@ -17,20 +17,7 @@ public sealed class MediaTekCacheReadMethod : IFirmwareExtractionMethod
     // length of exactly 0x10000 truncates to 0 in the transport and the drive returns GOOD with a zero-byte
     // transfer — which the old code misread as a (false) "cache is empty" and blamed on the hardware.
     private const int ChunkSize = 0x4000;
-    // Read up to the largest plausible cache (~8 MB) but stop early once it is clearly empty.
-    private const uint MaxSize = 8 * 1024 * 1024;
-    // If nothing non-zero by here, treat the cache as empty and stop. Kept small: repeatedly issuing
-    // 0xF1 against an empty cache can make some drives stop responding until the command times out.
-    private const uint EmptyExitThreshold = 128 * 1024;
-    // The controller aliases a small unique cache region across the whole 0xF1 address window (e.g. ~1 MiB
-    // mirrored 8× over 8 MiB). Once ≥2 copies have been read, the repeat is detected and the read stops, so
-    // the dump is the unique region, not megabytes of identical mirror copies. Candidate periods are tried
-    // smallest-first (so the dump is trimmed maximally) and span common cache sizes down to 256 KiB. Detection
-    // uses a whole-overlap non-zero-aware compare — a false small period would need the ENTIRE buffer to
-    // coincidentally repeat, which is vanishingly unlikely for real data, so this won't over-trim.
-    private const int MinPeriod = 0x40000;   // 256 KiB — the smallest period we will trim to
-    private static readonly int[] PeriodCandidates =
-        { 0x40000, 0x80000, 0x100000, 0x180000, 0x200000, 0x300000, 0x400000 };
+    private const uint MaxSize = 8 * 1024 * 1024; // bounded capture window
 
     public string Id => "mediatek";
     public string DisplayName => "MediaTek internal cache read (0xF1)";
@@ -46,256 +33,38 @@ public sealed class MediaTekCacheReadMethod : IFirmwareExtractionMethod
         _ => MethodApplicability.No($"Detected {chipset.Family} chipset; 0xF1 read-cache targets MediaTek drives."),
     };
 
-    public ExtractionResult Extract(ScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
+    public ExtractionResult Extract(IScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
         IProgress<ExtractionProgress> progress, CancellationToken ct)
     {
-        progress.Report(new ExtractionProgress(0, "MediaTek cache read (0xF1)"));
-
-        var buf = new byte[MaxSize];
-        int written = 0;
-        long nonZero = 0;
-        uint offset = 0;
-        int mirrorPeriod = 0;
-        long nextMirrorCheck = 2L * MinPeriod;   // first check once two minimum-period units are in
-        string stop = $"reached the {MaxSize / (1024 * 1024)} MiB cap";
-
-        while (offset < MaxSize)
+        device = device.WithCancellation(ct);
+        progress.Report(new ExtractionProgress(0, "Reading controller RAM (raw address space)"));
+        using var output = new MemoryStream();
+        string stop = "read the configured 8 MiB address window";
+        while (output.Length < MaxSize)
         {
-            ct.ThrowIfCancellationRequested();
-
-            // Bail early if the cache is clearly empty, rather than reading megabytes of zeros.
-            if (nonZero == 0 && offset >= EmptyExitThreshold) { stop = $"cache empty through {offset:N0} bytes"; break; }
-
-            uint len = Math.Min((uint)ChunkSize, MaxSize - offset);
-            var r = device.SendCommand(ScsiCommand.MediaTekReadCache(offset, len), ScsiDirection.In,
-                new byte[len], note: $"MediaTek 0xF1 read-cache off={offset} len={len}");
-
-            // The first read doubles as the support probe. ILLEGAL REQUEST (key 0x05) = the drive rejected the
-            // command (not a MediaTek cache-read drive); anything else means it understood it.
-            if (offset == 0)
+            int length = (int)Math.Min(ChunkSize, MaxSize - output.Length);
+            var r = device.SendCommand(ScsiCommand.MediaTekReadCache((uint)output.Length, (uint)length),
+                ScsiDirection.In, new byte[length], note: $"MediaTek cache offset=0x{output.Length:X} length={length}");
+            if (!r.Good || !r.ValidTransferLength || r.TransferredLength == 0 || r.Data is null)
             {
-                var s = r.SenseInfo;
-                if (r.DeviceIoOk && r.ScsiStatus != 0x00 && s.Key == 0x05)
-                    return ExtractionResult.Unsupported(Id, DisplayName,
-                        $"The drive rejected the MediaTek 0xF1 read-cache command (ILLEGAL REQUEST, asc={s.Asc:X2}/{s.Ascq:X2}). " +
-                        "It is not a MediaTek cache-read drive, or the firmware does not expose this command.");
-                if (!r.Good || r.Data is null)
-                    return ExtractionResult.Unsupported(Id, DisplayName,
-                        $"MediaTek 0xF1 read-cache did not return data ({r.StatusText}).");
+                stop = !r.Good ? r.StatusText : !r.ValidTransferLength
+                    ? $"invalid transfer length {r.TransferredLength}/{length}" : "zero-byte transfer";
+                if (output.Length == 0)
+                    return r.DeviceIoOk && r.SenseInfo.OpcodeUnsupported
+                        ? ExtractionResult.Unsupported(Id, DisplayName, stop)
+                        : ExtractionResult.Failed(Id, DisplayName, stop);
+                break;
             }
-
-            if (!r.Good || r.Data is null) { stop = $"drive stopped at {offset:N0} bytes ({r.StatusText})"; break; }
-
-            // Honour the drive-reported transfer length (Windows SPTI sets it to the bytes actually moved); a
-            // short-but-non-zero read is a per-command cap, not end-of-data, so continue from offset+got.
-            int got = r.TransferredLength;
-            if (got < 0 || got > (int)len) got = (int)len;
-            if (got == 0) { stop = $"empty read at {offset:N0} bytes (end of readable cache)"; break; }
-
-            Array.Copy(r.Data, 0, buf, written, got);
-            for (int i = 0; i < got; i++) if (r.Data[i] != 0) nonZero++;
-            written += got;
-            offset += (uint)got;
-            progress.Report(new ExtractionProgress((int)(100L * offset / MaxSize)));
-
-            // Once ≥2 units are in, detect the cache mirror and stop — keep only the unique region. Triggered by
-            // a byte threshold (re-anchored to the next unit), not exact alignment, so an occasional short read
-            // can't silently disable de-mirroring. Byte placement is by absolute offset, so the compare is valid
-            // regardless of how the reads chunked.
-            if (nonZero > 0 && written >= nextMirrorCheck)
-            {
-                nextMirrorCheck = ((long)(written / MinPeriod) + 1) * MinPeriod;
-                int p = FindPeriod(buf, written);
-                if (p > 0)
-                {
-                    mirrorPeriod = p;
-                    stop = $"cache mirrors every {p / 1024:N0} KiB ({written / p}× seen) — kept the unique region";
-                    break;
-                }
-            }
+            output.Write(r.Data, 0, r.TransferredLength);
+            progress.Report(new ExtractionProgress((int)(100 * output.Length / MaxSize)));
         }
-
-        int keep = mirrorPeriod > 0 ? mirrorPeriod : written;
-        byte[] primary = buf[..keep];
-
-        if (nonZero == 0)
-            return ExtractionResult.Unsupported(Id, DisplayName,
-                $"The MediaTek 0xF1 cache returned {primary.Length:N0} bytes but all were zero ({stop}). On this drive the " +
-                "cache holds disc data (empty with no/blank media), not the firmware ROM. Try again with a data disc " +
-                "inserted to capture the cache, or use the flash-read method (0x3C mode 6) / a hardware programmer for a true dump.");
-
-        // Second pass: if a mirror was detected early, probe at offsets beyond the mirror boundary to
-        // discover additional unique DRAM regions (e.g. separate bank at higher addresses on MT62xx).
-        var additional = new List<(uint Offset, byte[] Data)>();
-        if (mirrorPeriod > 0 && written > mirrorPeriod)
-        {
-            // Probe from the first unread byte, then jump in mirror-sized steps. The initial read can stop
-            // between mirror boundaries after a short transfer; rounding up would skip that entire region.
-            // The controller may have placed a different region at a non-mirror-aligned offset.
-            long nextCandidate = written;
-            for (int attempt = 0; attempt < 8 && nextCandidate < MaxSize; attempt++)
-            {
-                long probeOff = nextCandidate + attempt * mirrorPeriod;
-                if (probeOff >= MaxSize) break;
-
-                uint probeOffset = (uint)probeOff;
-                var probe = device.SendCommand(
-                    ScsiCommand.MediaTekReadCache(probeOffset, (uint)ChunkSize), ScsiDirection.In,
-                    new byte[ChunkSize], note: $"MediaTek 0xF1 second-pass probe off={probeOffset}");
-
-                if (!probe.Good || probe.Data is null) break;
-                int got = probe.TransferredLength;
-                if (got < 0 || got > ChunkSize) got = ChunkSize;
-                if (got == 0) break;
-
-                // Check if this region is genuinely new (not a shift of the mirror)
-                long nz = 0;
-                for (int i = 0; i < got; i++) if (probe.Data[i] != 0) nz++;
-                if (nz == 0) continue;
-
-                // Read up to the mirror period from this starting point
-                int regionSize = Math.Min(mirrorPeriod, (int)(MaxSize - probeOffset));
-                var regionBuf = new byte[regionSize];
-                int regionWritten = 0;
-                uint roff = 0;
-                while (roff < regionSize)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    uint rlen = Math.Min((uint)ChunkSize, (uint)(regionSize - roff));
-                    var rr = device.SendCommand(
-                        ScsiCommand.MediaTekReadCache(probeOffset + roff, rlen), ScsiDirection.In,
-                        new byte[rlen], note: $"MediaTek 0xF1 additional off={probeOffset + roff} len={rlen}");
-                    if (!rr.Good || rr.Data is null) break;
-                    int rgot = rr.TransferredLength;
-                    if (rgot < 0 || rgot > (int)rlen) rgot = (int)rlen;
-                    if (rgot == 0) break;
-                    Array.Copy(rr.Data, 0, regionBuf, regionWritten, rgot);
-                    regionWritten += rgot;
-                    roff += (uint)rgot;
-                    // Stop if data turns to all zeros (end of this region)
-                    bool allZero = true;
-                    for (int i = 0; i < rgot; i++) if (rr.Data[i] != 0) { allZero = false; break; }
-                    if (allZero) break;
-                }
-
-                // Preserve every byte the device reported as transferred. A valid firmware region may
-                // legitimately end in zero-filled tables or padding.
-                int rkeep = regionWritten;
-                if (rkeep > 64)   // must have meaningful data (more than just a 64-byte status blob)
-                {
-                    // Verify it's not just another mirror of the primary region
-                    if (!IdenticalToPrimary(primary, keep, regionBuf, rkeep))
-                    {
-                        additional.Add((probeOffset, regionBuf[..rkeep]));
-                        progress.Report(new ExtractionProgress(90 + attempt,
-                            null, $"Second-pass found unique region at 0x{probeOffset:X}: {rkeep} bytes"));
-                    }
-                }
-            }
-        }
-
-        byte[] data;
-        string secondPassNote = "";
-        if (additional.Count > 0)
-        {
-            // Composite assembly: primary region + each additional region with a marker prefix
-            long totalSize = keep + additional.Sum(a => 128L + a.Data.Length);
-            if (totalSize > int.MaxValue - 4096) totalSize = int.MaxValue - 4096;
-            using var ms = new System.IO.MemoryStream((int)totalSize);
-
-            // Leading composite file identifier
-            byte[] fileId = System.Text.Encoding.ASCII.GetBytes(
-                $"FirmwareStudio 0xF1 cache composite dump — {1 + additional.Count} region(s) [v2]\r\n" +
-                $"Created: {DateTime.UtcNow:O}\r\n\r\n");
-            ms.Write(fileId);
-
-            // Write primary region
-            string primaryHdr = $"=== PRIMARY @0x00000000 ===  size={keep}  non-zero={nonZero}".PadRight(127) + "\n";
-            byte[] ph = System.Text.Encoding.ASCII.GetBytes(primaryHdr[..Math.Min(primaryHdr.Length, 128)]);
-            byte[] paddedPh = new byte[128];
-            Array.Copy(ph, paddedPh, Math.Min(ph.Length, 128));
-            ms.Write(paddedPh);
-            ms.Write(primary);
-
-            foreach (var (off, addData) in additional)
-            {
-                long anz = 0;
-                foreach (byte b in addData) if (b != 0) anz++;
-                string hdr = $"=== REGION @0x{off:X8} ===  size={addData.Length}  non-zero={anz}".PadRight(127) + "\n";
-                byte[] h = System.Text.Encoding.ASCII.GetBytes(hdr[..Math.Min(hdr.Length, 128)]);
-                byte[] paddedH = new byte[128];
-                Array.Copy(h, paddedH, Math.Min(h.Length, 128));
-                ms.Write(paddedH);
-                ms.Write(addData);
-            }
-            data = ms.ToArray();
-            secondPassNote = $" Second pass found {additional.Count} additional unique region(s) " +
-                             $"at {string.Join(", ", additional.Select(a => $"0x{a.Offset:X}"))} — composite dump built.";
-        }
-        else
-        {
-            data = primary;
-        }
-
-        var analysis = DumpAnalyzer.Analyze(data);
-        string mirrorNote = mirrorPeriod > 0
-            ? $" De-mirrored: the controller aliases this {mirrorPeriod / 1024:N0} KiB region across the full 0xF1 window, so only the unique copy is kept."
-            : "";
-        return ExtractionResult.Ok(Id, DisplayName, data,
-            "MediaTek controller cache/RAM image (resident firmware code/config and/or cached disc data)",
-            $"Read {data.Length:N0} bytes from the MediaTek internal cache via opcode 0xF1. {analysis.Verdict()}{mirrorNote}{secondPassNote}");
-    }
-
-    /// <summary>
-    /// Smallest candidate period P (P ≤ len/2) at which the whole buffer repeats: the overlap
-    /// <c>buf[0..len-P)</c> matches <c>buf[P..len)</c> on their non-zero content. Whole-overlap (not just the
-    /// first two blocks) means a spurious small period would need the entire buffer to coincide, so this
-    /// won't over-trim. 0 = no repeat detected.
-    /// </summary>
-    private static int FindPeriod(byte[] buf, int len)
-    {
-        foreach (int p in PeriodCandidates)
-        {
-            if ((long)p * 2 > len) break;   // ascending → need at least two copies before P is testable
-            if (SimilarNonZero(buf, 0, p, len - p) >= 0.85)
-                return p;
-        }
-        return 0;
-    }
-
-    /// <summary>Fraction of "meaningful" positions (either side non-zero) in two blocks that are byte-equal;
-    /// returns 0 if there is too little non-zero data to judge (so two near-empty blocks don't false-match).</summary>
-    private static double SimilarNonZero(byte[] buf, int aStart, int bStart, int count)
-    {
-        long considered = 0, matches = 0;
-        for (int i = 0; i < count; i++)
-        {
-            byte a = buf[aStart + i], b = buf[bStart + i];
-            if (a == 0 && b == 0) continue;
-            considered++;
-            if (a == b) matches++;
-        }
-        return considered < count / 64 ? 0 : (double)matches / considered;
-    }
-
-    /// <summary>Returns true if <c>other</c> appears to be a mirror/duplicate of the primary buffer (same
-    /// non-zero content shifted to a different base offset). Uses a simple byte-for-byte comparison of the
-    /// first overlapping block to avoid false-positive "unique" regions.</summary>
-    private static bool IdenticalToPrimary(byte[] primary, int primaryLen, byte[] other, int otherLen)
-    {
-        // Compare the entire overlap: if >50% of non-zero bytes match at corresponding positions,
-        // this is likely a mirror (or an aligned copy) — not truly unique.
-        int cmpLen = Math.Min(primaryLen, otherLen);
-        if (cmpLen < 64) return false;
-        long considered = 0, matches = 0;
-        for (int i = 0; i < cmpLen; i++)
-        {
-            byte a = primary[i], b = other[i];
-            if (a == 0 && b == 0) continue;
-            considered++;
-            if (a == b) matches++;
-        }
-        // If >50% of overlapping non-zero bytes match, treat it as not truly unique
-        return considered > 0 && matches * 2 > considered;
+        ct.ThrowIfCancellationRequested();
+        byte[] data = output.ToArray();
+        string summary = $"Captured raw addresses 0x000000..0x{data.Length:X6} ({data.Length:N0} bytes); {stop}. " +
+            "Zero-filled spans and repeated bytes are preserved. " + DumpAnalyzer.Analyze(data).Verdict();
+        const string label = "raw controller RAM/cache (may include disc data; not a verified ROM)";
+        return data.Length == MaxSize
+            ? ExtractionResult.Ok(Id, DisplayName, data, label, summary)
+            : ExtractionResult.Partial(Id, DisplayName, data, label, summary);
     }
 }

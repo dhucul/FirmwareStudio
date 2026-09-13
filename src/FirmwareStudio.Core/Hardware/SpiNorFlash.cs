@@ -28,9 +28,12 @@ public static class SpiNorFlash
     };
 
     /// <summary>Read RDID (0x9F). The capacity byte is log2(size) for most 25-series NOR chips.</summary>
-    public static SpiFlashChip ReadId(Ch341Device dev, Action<string>? log = null)
+    public static SpiFlashChip ReadId(ISpiDevice dev, Action<string>? log = null, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         byte[] resp = dev.SpiTransfer(new byte[] { 0x9F, 0x00, 0x00, 0x00 });
+        ct.ThrowIfCancellationRequested();
+        if (resp.Length != 4) throw new InvalidDataException("Incomplete JEDEC ID response.");
         byte man = resp[1], type = resp[2], cap = resp[3];
         log?.Invoke($"RDID (9F): {man:X2} {type:X2} {cap:X2}");
 
@@ -67,15 +70,22 @@ public static class SpiNorFlash
     };
 
     /// <summary>Read the entire chip via READ (0x03) in 4 KB blocks, reporting progress.</summary>
-    public static byte[] ReadAll(Ch341Device dev, SpiFlashChip chip,
+    public static byte[] ReadAll(ISpiDevice dev, SpiFlashChip chip,
         IProgress<int>? progress, Action<string>? log, CancellationToken ct)
     {
-        if (!chip.SizeKnown)
+        ct.ThrowIfCancellationRequested();
+        if (!chip.SizeKnown || chip.LooksEmpty)
             throw new InvalidOperationException(
                 "Flash capacity could not be determined from the JEDEC ID, so the read size is unknown.");
         if (chip.SizeBytes > MaxThreeByteAddress)
             throw new NotSupportedException(
                 "Flash larger than 16 MB needs 4-byte addressing, which is not implemented (optical-drive flashes are 1–4 MB).");
+
+        var actual = ReadId(dev, log, ct);
+        if (actual.LooksEmpty || actual.ManufacturerId != chip.ManufacturerId ||
+            actual.MemoryType != chip.MemoryType || actual.CapacityCode != chip.CapacityCode ||
+            actual.SizeBytes != chip.SizeBytes)
+            throw new InvalidDataException("The connected flash chip changed after identification. Identify the chip again before reading.");
 
         long size = chip.SizeBytes;
         var outData = new byte[size];
@@ -93,10 +103,13 @@ public static class SpiNorFlash
             cmd[3] = (byte)(addr & 0xFF);
 
             byte[] resp = dev.SpiTransfer(cmd);
+            ct.ThrowIfCancellationRequested();
+            if (resp.Length != cmd.Length) throw new InvalidDataException("Incomplete SPI transfer.");
             Array.Copy(resp, 4, outData, addr, n);
             progress?.Report((int)(100L * (addr + n) / size));
         }
 
+        ct.ThrowIfCancellationRequested();
         log?.Invoke("Read complete.");
         return outData;
     }

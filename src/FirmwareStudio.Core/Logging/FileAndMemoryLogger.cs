@@ -26,10 +26,27 @@ public sealed class FileAndMemoryLogger : IScsiLogger, IDisposable
     {
         lock (_gate)
         {
-            _writer?.Flush();
-            _writer?.Dispose();
-            _writer = new StreamWriter(path, append: false, Encoding.UTF8) { AutoFlush = true };
-            _writer.WriteLine($"# FirmwareStudio command log — {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}Z");
+            if (_writer?.BaseStream is FileStream current &&
+                string.Equals(Path.GetFullPath(path), current.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                _writer.Flush();
+                current.SetLength(0);
+                current.Position = 0;
+                _writer.WriteLine($"# FirmwareStudio command log — {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}Z");
+                return;
+            }
+            StreamWriter? replacement = null;
+            try
+            {
+                replacement = new StreamWriter(path, append: false, Encoding.UTF8) { AutoFlush = true };
+                replacement.WriteLine($"# FirmwareStudio command log — {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}Z");
+                _writer?.Flush();
+                var old = _writer;
+                _writer = replacement;
+                replacement = null;
+                old?.Dispose();
+            }
+            finally { replacement?.Dispose(); }
         }
     }
 
@@ -66,9 +83,9 @@ public sealed class FileAndMemoryLogger : IScsiLogger, IDisposable
     {
         lock (_gate)
         {
-            _writer?.Flush();
-            _writer?.Dispose();
+            var writer = _writer;
             _writer = null;
+            writer?.Dispose();
         }
     }
 }

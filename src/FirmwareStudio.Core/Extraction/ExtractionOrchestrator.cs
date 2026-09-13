@@ -56,25 +56,33 @@ public sealed class ExtractionOrchestrator
     /// (illegal opcode → Unsupported), so the full read only happens for the method that wins. Priority order
     /// puts higher-yield firmware reads first (nec/mtk-flash flash → mediatek cache → plds regs → universal).
     /// </summary>
-    public async Task<ExtractionResult> RunAutoAsync(ScsiDevice device, DriveIdentity id, ChipsetInfo chip,
+    public async Task<ExtractionResult> RunAutoAsync(IScsiDevice device, DriveIdentity id, ChipsetInfo chip,
         IProgress<ExtractionProgress> progress, CancellationToken ct)
     {
-        ExtractionResult? last = null;
+        ExtractionResult? empty = null;
+        var attempts = new List<ExtractionResult>();
         foreach (var m in AutoMethods())
         {
             ct.ThrowIfCancellationRequested();
             progress.Report(new ExtractionProgress(0, $"Auto: trying {m.DisplayName}…",
                 $"Auto → {m.DisplayName} ({m.Evaluate(id, chip).Level})"));
             var res = await RunAsync(device, id, chip, m, progress, ct);
-            if (res.Success && res.ByteCount > 0)
+            ct.ThrowIfCancellationRequested();
+            if (res.Success && res.ByteCount > 0 && res.HasInformativeBytes)
             {
-                progress.Report(new ExtractionProgress(100, null, $"Auto selected {m.DisplayName}."));
+                progress.Report(new ExtractionProgress(res.IsComplete ? 100 : 0, null,
+                    $"Auto selected {m.DisplayName} ({res.Status}). " +
+                    (res.IsComplete ? "" : "Keeping this preferred partial capture; other methods can be run explicitly.")));
                 return res;
             }
-            last = res;
+            attempts.Add(res);
+            if (res.Success && res.ByteCount > 0) empty ??= res;
         }
-        return last ?? ExtractionResult.Unsupported("auto", "Auto",
-            "No extraction method returned data on this drive.");
+        if (empty is not null) return empty;
+        string summary = string.Join("\n", attempts.Select(a => $"{a.MethodName}: {a.Status} — {a.Summary}"));
+        return attempts.Any(a => a.Status == ExtractionStatus.Failed)
+            ? ExtractionResult.Failed("auto", "Auto", summary)
+            : ExtractionResult.Unsupported("auto", "Auto", summary);
     }
 
     private IEnumerable<IFirmwareExtractionMethod> AutoMethods()
@@ -95,12 +103,14 @@ public sealed class ExtractionOrchestrator
             yield return universal;
     }
 
-    public async Task<ExtractionResult> RunAsync(ScsiDevice device, DriveIdentity id, ChipsetInfo chip,
+    public async Task<ExtractionResult> RunAsync(IScsiDevice device, DriveIdentity id, ChipsetInfo chip,
         IFirmwareExtractionMethod method, IProgress<ExtractionProgress> progress, CancellationToken ct)
     {
         try
         {
-            return await Task.Run(() => method.Extract(device, id, chip, progress, ct), ct);
+            var result = await Task.Run(() => method.Extract(device, id, chip, progress, ct), ct);
+            ct.ThrowIfCancellationRequested();
+            return result;
         }
         catch (OperationCanceledException)
         {

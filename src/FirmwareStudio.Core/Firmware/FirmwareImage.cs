@@ -14,8 +14,8 @@ public readonly record struct FirmwareRegion(long Start, long End, double Entrop
 /// file — the payload the vendor updater extracts from its password-protected ZIP and flashes as-is). The
 /// field offsets are the exact ones the official <c>891SAFPLUSPCDriveUpdater</c> reads (model @0x414/24B,
 /// date @0xE25A4/10B, version @size-4/4B), recovered by decompiling it. Read-only characterisation — this is
-/// the <b>byte-exact flashable image</b>, but its body is encrypted/compressed by the controller's own scheme
-/// (the PC side flashes it verbatim; there is no PC-side decryptor), so it is not a plaintext ROM.
+/// vendor wrapper and observed content characteristics. Recognition and entropy measurements do not
+/// establish payload integrity, encryption provenance, or suitability for flashing.
 /// </summary>
 public sealed class FirmwareImageInfo
 {
@@ -48,14 +48,15 @@ public sealed class FirmwareImageInfo
             sb.Append($"{Size:N0}-byte image (no VPD_update_file marker — not a recognised PLDS update file). ");
         }
 
-        var body = Regions.Where(r => r.Kind.StartsWith("encrypted", StringComparison.Ordinal)).ToList();
+        var body = Regions.Where(r => r.Kind.StartsWith("encrypted", StringComparison.Ordinal) ||
+            r.Kind.StartsWith("high-entropy", StringComparison.Ordinal)).ToList();
         if (body.Count > 0)
         {
             long enc = body.Sum(r => r.Length);
-            sb.Append($"This is the byte-exact flashable payload, but {enc:N0} bytes ({100.0 * enc / Math.Max(1, Size):F0}%) " +
-                      $"are high-entropy{(BodyCipherHint is null ? " (encrypted/compressed)" : $" — {BodyCipherHint}")}. " +
-                      "The vendor updater flashes this verbatim and the drive decrypts it internally — there is no PC-side " +
-                      "decryptor, so this is not a plaintext ROM. A readable image would require the controller key or hardware SoC access.");
+            sb.Append($"{enc:N0} bytes ({100.0 * enc / Math.Max(1, Size):F0}%) have high entropy, which can occur " +
+                      "in compressed, encrypted, or other structured data. " +
+                      (BodyCipherHint is null ? "" : BodyCipherHint + ". ") +
+                      "This analysis does not establish flashability, encryption provenance, or a decryption key.");
         }
         else
         {
@@ -77,45 +78,47 @@ public static class FirmwareImage
     private const int DateOffset = 927140;      // 0xE25A4 — updater: Array.Copy(src, 927140, date, 0, 10)
     private static readonly byte[] VpdMarker = "VPD_update_file"u8.ToArray();
 
-    public static FirmwareImageInfo Parse(byte[] data)
+    public static bool HasVpdMarker(byte[] data) => data.Length >= 0x400 + VpdMarker.Length &&
+        data.AsSpan(0x400, VpdMarker.Length).SequenceEqual(VpdMarker);
+
+    public static FirmwareImageInfo Parse(byte[] data, CancellationToken ct = default)
     {
-        bool isVpd = data.Length >= 0x400 + VpdMarker.Length &&
-                     data.AsSpan(0x400, VpdMarker.Length).SequenceEqual(VpdMarker);
+        ct.ThrowIfCancellationRequested();
+        bool isVpd = HasVpdMarker(data);
         string? magic = AsciiAt(data, 0, 19);
         string? model = data.Length >= ModelOffset + 24 ? AsciiAt(data, ModelOffset, 24) : null;
         string? version = data.Length >= 4 ? AsciiAt(data, data.Length - 4, 4) : null;
         string? date = data.Length >= DateOffset + 10 ? AsciiAt(data, DateOffset, 10) : null;
-        var regions = MapRegions(data);
+        var regions = MapRegions(data, ct, isVpd);
 
         return new FirmwareImageInfo
         {
             Size = data.Length,
             IsVpdUpdateImage = isVpd,
             Magic = Clean(magic),
-            Model = Clean(model),
-            Version = Clean(version),
+            Model = isVpd ? Clean(model) : null,
+            Version = isVpd ? Clean(version) : null,
             DateCode = isVpd && date is not null && date.Any(char.IsDigit) ? Clean(date) : null,
             Regions = regions,
-            BodyCipherHint = DetectBodyCipher(data, regions),
-            Content = DumpAnalyzer.Analyze(data, maxStrings: 120),
+            BodyCipherHint = DetectBodyCipher(data, regions, ct),
+            Content = DumpAnalyzer.Analyze(data, maxStrings: 120, ct: ct),
         };
     }
 
     /// <summary>
-    /// Inspect the high-entropy body for a cipher tell. Truly random data (a good stream/CBC cipher, or
-    /// compression) has ~no repeated 16-byte blocks; a large excess of exact 16-byte block duplicates means
-    /// identical plaintext blocks map to identical ciphertext — i.e. an <b>ECB-mode block cipher</b> with no
-    /// chaining. (This only leaks block equality, never the key — which lives in the controller.)
+    /// Report repeated 16-byte blocks as a structural observation, not proof of a cipher or key location.
     /// </summary>
-    private static string? DetectBodyCipher(byte[] data, List<FirmwareRegion> regions)
+    private static string? DetectBodyCipher(byte[] data, List<FirmwareRegion> regions, CancellationToken ct)
     {
-        var body = regions.FirstOrDefault(r => r.Kind.StartsWith("encrypted", StringComparison.Ordinal));
+        var body = regions.FirstOrDefault(r => r.Kind.StartsWith("encrypted", StringComparison.Ordinal) ||
+            r.Kind.StartsWith("high-entropy", StringComparison.Ordinal));
         if (body.Length < 0x10000) return null;
 
         var seen = new HashSet<(ulong, ulong)>();
         long total = 0, dup = 0;
         for (long p = body.Start; p + 16 <= body.End; p += 16)
         {
+            if ((p & 0xFFFF) == 0) ct.ThrowIfCancellationRequested();
             ulong a = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan((int)p, 8));
             ulong b = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan((int)p + 8, 8));
             if (!seen.Add((a, b))) dup++;
@@ -124,23 +127,24 @@ public static class FirmwareImage
         // A 128-bit block space makes even one random collision astronomically unlikely, so any real excess
         // (well above 0) is structural. Require a clear margin to avoid false positives on small bodies.
         if (total >= 4096 && dup >= 64)
-            return $"ECB-mode block cipher (16-byte blocks; {dup:N0} repeated ciphertext blocks reveal no chaining) — key resident in the controller";
+            return $"{dup:N0} repeated 16-byte blocks; consistent with repeated data or an ECB-like structure, not proof of encryption";
         return null;
     }
 
     /// <summary>Classify each 64 KiB block by entropy/position, then merge consecutive same-kind blocks.</summary>
-    private static List<FirmwareRegion> MapRegions(byte[] data)
+    private static List<FirmwareRegion> MapRegions(byte[] data, CancellationToken ct, bool isVpd)
     {
         var merged = new List<FirmwareRegion>();
         for (int off = 0; off < data.Length; off += BlockSize)
         {
+            ct.ThrowIfCancellationRequested();
             int end = Math.Min(off + BlockSize, data.Length);
             var span = data.AsSpan(off, end - off);
             double h = Entropy(span);
             long nz = 0;
             foreach (byte b in span) if (b != 0) nz++;
             double nzPct = 100.0 * nz / span.Length;
-            string kind = Classify(off, h, nzPct);
+            string kind = Classify(off, h, nzPct, isVpd);
 
             if (merged.Count > 0 && merged[^1].Kind == kind)
                 merged[^1] = merged[^1] with { End = end };   // extend
@@ -159,10 +163,10 @@ public static class FirmwareImage
         return merged;
     }
 
-    private static string Classify(int offset, double entropy, double nonZeroPct)
+    private static string Classify(int offset, double entropy, double nonZeroPct, bool isVpd)
     {
-        if (offset < 0x10000) return "header / VPD wrapper";
-        if (entropy >= 7.5) return "encrypted / compressed body";
+        if (isVpd && offset < 0x10000) return "header / VPD wrapper";
+        if (entropy >= 7.5) return isVpd ? "encrypted / compressed body (heuristic)" : "high-entropy data";
         if (entropy <= 1.0 || nonZeroPct < 2) return "padding / fill";
         return "config / tables";
     }
@@ -201,16 +205,4 @@ public static class FirmwareImage
         return t.Length == 0 ? null : t;
     }
 
-    private static int IndexOf(byte[] haystack, byte[] needle, int start, int end)
-    {
-        end = Math.Min(end, haystack.Length - needle.Length);
-        for (int i = Math.Max(0, start); i <= end; i++)
-        {
-            bool ok = true;
-            for (int j = 0; j < needle.Length; j++)
-                if (haystack[i + j] != needle[j]) { ok = false; break; }
-            if (ok) return i;
-        }
-        return -1;
-    }
 }

@@ -44,7 +44,7 @@ public sealed class CoreRegressionTests
 
         Assert.False(PioneerFirmwareImage.LooksLikeImage(truncated));
         var analysis = FirmwareFile.Analyze(truncated);
-        Assert.Equal(FirmwareFileKind.VpdImage, analysis.Kind);
+        Assert.Equal(FirmwareFileKind.Unknown, analysis.Kind);
     }
 
     [Fact]
@@ -199,7 +199,7 @@ public sealed class CoreRegressionTests
         public MethodApplicability Evaluate(DriveIdentity id, ChipsetInfo chipset)
             => new(applicability, "test");
 
-        public ExtractionResult Extract(ScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
+        public ExtractionResult Extract(IScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
             IProgress<ExtractionProgress> progress, CancellationToken ct)
             => throw new NotSupportedException();
     }

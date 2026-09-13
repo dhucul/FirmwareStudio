@@ -126,7 +126,7 @@ public static class Sweep
             Console.WriteLine($"Drive {target.Letter}: '{id.Vendor}' '{id.Model}' → {chip.Family} ({chip.Name})\n");
 
             var orch = new ExtractionOrchestrator();
-            var progress = new Progress<ExtractionProgress>(p => { if (p.LogLine is not null) Console.WriteLine($"  {p.LogLine}"); });
+            var progress = new FirmwareStudio.Smoke.InlineProgress<ExtractionProgress>(p => { if (p.LogLine is not null) Console.WriteLine($"  {p.LogLine}"); });
             var res = orch.RunAutoAsync(dev, id, chip, progress, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
 
             Console.WriteLine($"\nAuto selected: {res.MethodId} — {res.MethodName}");
@@ -138,7 +138,7 @@ public static class Sweep
 
     /// <summary>
     /// Run the real MediaTek 0xF1 cache extraction against a drive (read-only) and report the result — used
-    /// to verify the de-mirror trim on live hardware. Run: <c>... -- cache [D]</c> (elevated).
+    /// to verify raw capture preservation on live hardware. Run: <c>... -- cache [D]</c> (elevated).
     /// </summary>
     public static int CacheRead(string? driveArg)
     {
@@ -161,7 +161,7 @@ public static class Sweep
             Console.WriteLine($"Drive {target.Letter}: '{id.Vendor}' '{id.Model}' → {chip.Family}\n");
 
             var method = new MediaTekCacheReadMethod();
-            var progress = new Progress<ExtractionProgress>(p => { if (p.LogLine is not null) Console.WriteLine($"  {p.LogLine}"); });
+            var progress = new FirmwareStudio.Smoke.InlineProgress<ExtractionProgress>(p => { if (p.LogLine is not null) Console.WriteLine($"  {p.LogLine}"); });
             var res = method.Extract(dev, id, chip, progress, System.Threading.CancellationToken.None);
 
             Console.WriteLine($"success = {res.Success}");
@@ -185,10 +185,15 @@ public static class Sweep
             return 1;
         }
 
-        byte[] data = File.ReadAllBytes(path);
+        byte[] data = FirmwareFile.ReadFile(path);
 
         // Auto-detect: a Pioneer updater vs a 0xF1 controller-RAM image vs a .1KN VPD flash image.
         var analysis = FirmwareFile.Analyze(data);
+        if (analysis.Kind == FirmwareFileKind.Composite)
+        {
+            Console.WriteLine(analysis.Composite!.Describe());
+            return 0;
+        }
         if (analysis.Kind == FirmwareFileKind.PioneerUpdate)
         {
             var pio = analysis.Pioneer!;
@@ -334,10 +339,10 @@ public static class Sweep
 
                 try
                 {
-                    var progress = new Progress<ExtractionProgress>(p => { });
+                    var progress = new FirmwareStudio.Smoke.InlineProgress<ExtractionProgress>(p => { });
                     var res = method.Extract(dev, id, chip, progress, CancellationToken.None);
-                    string status = res.Success ? "OK" : (res.Reason != null ? "N/A" : "FAIL");
-                    if (!res.Success && res.Reason is null) failed = true;
+                    string status = res.Status.ToString();
+                    if (res.Status == ExtractionStatus.Failed) failed = true;
                     Console.WriteLine($"{status,-8} {res.ByteCount,8:N0} B  {res.Summary.Replace('\n', ' ').Truncate(200)}");
 
                     if (res.Success)
@@ -365,7 +370,7 @@ public static class Sweep
             Console.WriteLine("Empirical Auto result:");
             try
             {
-                var progress = new Progress<ExtractionProgress>(p =>
+                var progress = new FirmwareStudio.Smoke.InlineProgress<ExtractionProgress>(p =>
                 {
                     if (p.LogLine is not null) Console.WriteLine($"  {p.LogLine}");
                     if (p.Stage is not null) Console.WriteLine($"  [{p.Stage}]");
@@ -401,7 +406,7 @@ public static class Sweep
             return 1;
         }
 
-        byte[] data = File.ReadAllBytes(path);
+        byte[] data = FirmwareFile.ReadFile(path);
         var a = DumpAnalyzer.Analyze(data, maxStrings: 120);
 
         Console.WriteLine($"Dump: {path}\n");

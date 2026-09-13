@@ -1,4 +1,5 @@
 using System.IO;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
@@ -36,6 +37,47 @@ public partial class MainWindow : Window
     private readonly List<string> _hwLog = new();
     private CancellationTokenSource? _hwCts;
 
+    private bool _opticalBusy, _hardwareBusy, _closingRequested;
+    private TaskCompletionSource _idle = CompletedSignal();
+
+    private static TaskCompletionSource CompletedSignal()
+    {
+        var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        signal.SetResult();
+        return signal;
+    }
+
+    private void UpdateIdle()
+    {
+        if (!_opticalBusy && !_hardwareBusy) _idle.TrySetResult();
+        else if (_idle.Task.IsCompleted) _idle = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    protected override async void OnClosing(CancelEventArgs e)
+    {
+        if (_opticalBusy || _hardwareBusy)
+        {
+            e.Cancel = true;
+            base.OnClosing(e);
+            if (_closingRequested) return;
+            _closingRequested = true;
+            SetControlsBusy(_opticalBusy);
+            SetHwBusy(_hardwareBusy);
+            _cts?.Cancel();
+            _hwCts?.Cancel();
+            await _idle.Task;
+            Close();
+            return;
+        }
+        base.OnClosing(e);
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        _logger.Dispose();
+        base.OnClosed(e);
+    }
+
     private sealed record MethodChoice(string Label, string? Id);
 
     public MainWindow()
@@ -72,7 +114,7 @@ public partial class MainWindow : Window
         })
             AttachValueBox(box);
 
-        RefreshDrives();
+        Loaded += OnLoaded;
     }
 
     private static void AttachCopyMenu(TextBox box)
@@ -136,15 +178,36 @@ public partial class MainWindow : Window
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
-    private void OnRefresh(object sender, RoutedEventArgs e) => RefreshDrives();
-
-    private void RefreshDrives()
+    private async void OnLoaded(object sender, RoutedEventArgs e)
     {
+        Loaded -= OnLoaded;
+        await RefreshDrivesAsync();
+    }
+
+    private async void OnRefresh(object sender, RoutedEventArgs e) => await RefreshDrivesAsync();
+
+    private async Task RefreshDrivesAsync()
+    {
+        if (_opticalBusy || _closingRequested) return;
         ClearDriveContext();
-        var drives = DriveEnumerator.Scan();
-        DriveCombo.ItemsSource = drives;
-        if (drives.Count > 0) DriveCombo.SelectedIndex = 0;
-        AppendLog($"# {drives.Count} optical drive(s) found.");
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
+        SetControlsBusy(true);
+        try
+        {
+            var drives = await Task.Run(() => DriveEnumerator.Scan(ct), ct);
+            ct.ThrowIfCancellationRequested();
+            DriveCombo.ItemsSource = drives;
+            if (drives.Count > 0) DriveCombo.SelectedIndex = 0;
+            AppendLog($"# {drives.Count} optical drive(s) found.");
+        }
+        catch (OperationCanceledException) { StageText.Text = "Cancelled."; }
+        catch (Exception ex) { ShowError(ex.Message); }
+        finally
+        {
+            _cts.Dispose(); _cts = null;
+            SetControlsBusy(false);
+        }
     }
 
     private void OnDriveChanged(object sender, SelectionChangedEventArgs e) => ClearDriveContext();
@@ -173,8 +236,10 @@ public partial class MainWindow : Window
 
     private async void OnIdentify(object sender, RoutedEventArgs e)
     {
-        if (DriveCombo.SelectedItem is not OpticalDrive drive) return;
+        if (_opticalBusy || _closingRequested || DriveCombo.SelectedItem is not OpticalDrive drive) return;
         ClearDriveContext();
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
         SetControlsBusy(true);
         StageText.Text = "Identifying…";
         try
@@ -182,11 +247,13 @@ public partial class MainWindow : Window
             var (id, chip) = await Task.Run(() =>
             {
                 string bus = DriveEnumerator.QueryBusType(drive.Letter);
+                ct.ThrowIfCancellationRequested();
                 using var dev = ScsiDevice.Open(drive.Letter, _logger);
-                var identity = DriveIdentifier.Identify(dev, bus);
-                var chipset = ChipsetDetector.Detect(dev, identity);
+                var identity = DriveIdentifier.Identify(dev, bus, ct);
+                var chipset = ChipsetDetector.Detect(dev, identity, ct);
                 return (identity, chipset);
-            });
+            }, ct);
+            ct.ThrowIfCancellationRequested();
             _id = id;
             _chip = chip;
             ShowIdentity(id, chip);
@@ -194,12 +261,11 @@ public partial class MainWindow : Window
             ExtractButton.IsEnabled = true;
             StageText.Text = "Identified.";
         }
-        catch (Exception ex)
-        {
-            ShowError(ex.Message);
-        }
+        catch (OperationCanceledException) { StageText.Text = "Cancelled."; }
+        catch (Exception ex) { ShowError(ex.Message); }
         finally
         {
+            _cts?.Dispose(); _cts = null;
             SetControlsBusy(false);
         }
     }
@@ -272,7 +338,7 @@ public partial class MainWindow : Window
 
     private async void OnExtract(object sender, RoutedEventArgs e)
     {
-        if (_id is null || _chip is null || DriveCombo.SelectedItem is not OpticalDrive drive) return;
+        if (_opticalBusy || _closingRequested || _id is null || _chip is null || DriveCombo.SelectedItem is not OpticalDrive drive) return;
         if (_id.DriveLetter != drive.Letter)
         {
             ClearDriveContext();
@@ -284,6 +350,8 @@ public partial class MainWindow : Window
         var method = isAuto ? null : ResolveMethod();
         _lastResult = null;
         _lastRunCommands = Array.Empty<CommandLogEntry>();
+        _ramData = null; _ramInfo = null; HexBox.Clear();
+        PreviewHeader.Text = "Dump preview";
         int commandStart = _logger.Entries.Count;
         _cts = new CancellationTokenSource();
         SetControlsBusy(true);
@@ -297,7 +365,8 @@ public partial class MainWindow : Window
 
         var progress = new Progress<ExtractionProgress>(p =>
         {
-            if (p.Percent > 0) Progress.Value = p.Percent;
+            if (p.Percent > 0 || p.Stage is not null)
+                Progress.Value = Math.Clamp(p.Percent, 0, 100);
             if (p.Stage is not null) StageText.Text = p.Stage;
             if (p.LogLine is not null) AppendLog("… " + p.LogLine);
         });
@@ -305,10 +374,21 @@ public partial class MainWindow : Window
         ScsiDevice? dev = null;
         try
         {
-            dev = await Task.Run(() => ScsiDevice.Open(drive.Letter, _logger));
+            var ct = _cts.Token;
+            dev = await Task.Run(() => ScsiDevice.Open(drive.Letter, _logger), ct);
+            var actual = await Task.Run(() => DriveIdentifier.Identify(dev,
+                DriveEnumerator.QueryBusType(drive.Letter), ct), ct);
+            ct.ThrowIfCancellationRequested();
+            if (!DriveIdentifier.SameDevice(_id, actual))
+            {
+                ClearDriveContext();
+                throw new InvalidOperationException("The connected drive changed after identification. Identify it again before extracting.");
+            }
+            _id = actual;
             var result = isAuto
                 ? await _orch.RunAutoAsync(dev, _id, _chip, progress, _cts.Token)
                 : await _orch.RunAsync(dev, _id, _chip, method!, progress, _cts.Token);
+            ct.ThrowIfCancellationRequested();
             _lastResult = result;
             _lastRunCommands = _logger.Entries.Skip(commandStart).ToArray();
             ShowResult(result);
@@ -337,26 +417,16 @@ public partial class MainWindow : Window
         Export8051Button.IsEnabled = false; _ramData = null; _ramInfo = null;   // reset; re-enabled below for a RAM dump
         if (result.Success && result.Firmware is not null)
         {
-            Progress.Value = 100;
-            StageText.Text = "Done.";
-            ResultText.Foreground = Palette.TextBrush;
+            if (result.IsComplete) Progress.Value = 100;
+            StageText.Text = result.IsComplete ? "Capture finished." : "Partial capture — see details.";
+            ResultText.Foreground = result.IsComplete ? Palette.TextBrush : Palette.PeachBrush;
             ResultText.Text = $"{result.Summary}\nData: {result.DataLabel}.";
             PreviewHeader.Text = $"Dump preview — {result.ByteCount:N0} bytes ({result.DataLabel})";
             HexBox.Text = HexDump.Format(result.Firmware);
             SaveButton.IsEnabled = result.ByteCount > 0;
 
-            // If this is a 0xF1 controller-RAM dump with an 8051 code bank, offer the de-bank export right
-            // here — no need to save the raw dump and re-open it via "Analyze firmware file…".
-            if (result.ByteCount > 0 && OpticalRamImage.Looks(result.Firmware))
-            {
-                var info = OpticalRamImage.Parse(result.Firmware);
-                if (info.CodeBank is not null)
-                {
-                    _ramData = result.Firmware;
-                    _ramInfo = info;
-                    Export8051Button.IsEnabled = true;
-                }
-            }
+            try { ConfigureRamExport(result.Firmware, FirmwareFile.Analyze(result.Firmware)); }
+            catch (InvalidDataException ex) { AppendLog("# Payload analysis skipped: " + ex.Message); }
         }
         else
         {
@@ -367,6 +437,20 @@ public partial class MainWindow : Window
             PreviewHeader.Text = "Dump preview";
             SaveButton.IsEnabled = false;
         }
+    }
+
+    private void ConfigureRamExport(byte[] data, FirmwareFileAnalysis analysis)
+    {
+        _ramData = null; _ramInfo = null;
+        if (analysis.Kind == FirmwareFileKind.ControllerRam)
+        {
+            _ramData = data; _ramInfo = analysis.ControllerRam;
+        }
+        else if (analysis.Composite?.Primary is { Analysis.ControllerRam: { } info } primary)
+        {
+            _ramData = primary.Data; _ramInfo = info;
+        }
+        Export8051Button.IsEnabled = _ramInfo?.CodeBank is not null;
     }
 
     private void OnCancel(object sender, RoutedEventArgs e) => _cts?.Cancel();
@@ -400,6 +484,7 @@ public partial class MainWindow : Window
     // This is a read-only file analysis: it never writes to a drive and never flashes anything.
     private async void OnAnalyzeFile(object sender, RoutedEventArgs e)
     {
+        if (_opticalBusy || _closingRequested) return;
         var dlg = new OpenFileDialog
         {
             Filter = "Firmware images & updaters (*.1KN;*.1JN;*.bin;*.exe)|*.1KN;*.1JN;*.bin;*.exe|All files (*.*)|*.*",
@@ -414,14 +499,19 @@ public partial class MainWindow : Window
         _ramData = null;
         _ramInfo = null;
         StageText.Text = "Analyzing firmware file…";
+        HexBox.Clear(); ResultText.Text = "";
+        PreviewHeader.Text = "File preview";
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
         SetControlsBusy(true);
         try
         {
             var parsed = await Task.Run(() =>
             {
-                byte[] bytes = File.ReadAllBytes(dlg.FileName);
-                return (Data: bytes, Analysis: FirmwareFile.Analyze(bytes));
-            });
+                byte[] bytes = FirmwareFile.ReadFile(dlg.FileName, ct);
+                return (Data: bytes, Analysis: FirmwareFile.Analyze(bytes, ct));
+            }, ct);
+            ct.ThrowIfCancellationRequested();
             byte[] data = parsed.Data;
             var analysis = parsed.Analysis;
             StageText.Text = "Firmware file analyzed.";
@@ -431,7 +521,12 @@ public partial class MainWindow : Window
             AppendLog($"# Analyzed firmware file: {dlg.FileName}");
 
             // Auto-detect: a Pioneer updater vs a 0xF1 controller-RAM image vs a .1KN VPD flash image.
-            if (analysis.Kind == FirmwareFileKind.PioneerUpdate)
+            if (analysis.Kind == FirmwareFileKind.Composite)
+            {
+                ResultText.Text = analysis.Composite!.Describe();
+                ConfigureRamExport(data, analysis);
+            }
+            else if (analysis.Kind == FirmwareFileKind.PioneerUpdate)
             {
                 var pio = analysis.Pioneer!;
                 var sb = new System.Text.StringBuilder(pio.Describe());
@@ -475,12 +570,11 @@ public partial class MainWindow : Window
                     AppendLog($"#   0x{r.Start:X6}-0x{r.End:X6}  H={r.Entropy:F2}  nz={r.NonZeroPercent:F0}%  {r.Kind}");
             }
         }
-        catch (Exception ex)
-        {
-            ShowError($"Analyze failed: {ex.Message}");
-        }
+        catch (OperationCanceledException) { StageText.Text = "Cancelled."; }
+        catch (Exception ex) { ShowError($"Analyze failed: {ex.Message}"); }
         finally
         {
+            _cts?.Dispose(); _cts = null;
             SetControlsBusy(false);
         }
     }
@@ -565,18 +659,27 @@ public partial class MainWindow : Window
 
     private void SetControlsBusy(bool busy)
     {
+        _opticalBusy = busy;
+        UpdateIdle();
+        CancelButton.IsEnabled = busy && _cts is not null && !_closingRequested;
+        busy |= _closingRequested;
         IdentifyButton.IsEnabled = !busy;
         RefreshButton.IsEnabled = !busy;
         DriveCombo.IsEnabled = !busy;
         MethodCombo.IsEnabled = !busy;
         ExtractButton.IsEnabled = !busy && _id is not null;
         AnalyzeFileButton.IsEnabled = !busy;
+        if (busy) SaveButton.IsEnabled = false;
         if (busy) Export8051Button.IsEnabled = false;
     }
 
     // Serialize all hardware-tab actions: only one may touch the single CH341 adapter at a time.
     private void SetHwBusy(bool busy)
     {
+        _hardwareBusy = busy;
+        UpdateIdle();
+        HwCancelButton.IsEnabled = busy && _hwCts is not null && !_closingRequested;
+        busy |= _closingRequested;
         HwDetectButton.IsEnabled = !busy;
         HwIdentifyButton.IsEnabled = !busy;
         bool validChip = _hwChip is { SizeKnown: true, LooksEmpty: false };
@@ -611,7 +714,10 @@ public partial class MainWindow : Window
 
     private async void OnHwDetect(object sender, RoutedEventArgs e)
     {
+        if (_hardwareBusy || _closingRequested) return;
         ClearHardwareCapture(clearChip: true);
+        _hwCts = new CancellationTokenSource();
+        var ct = _hwCts.Token;
         SetHwBusy(true);
         try
         {
@@ -619,15 +725,19 @@ public partial class MainWindow : Window
             {
                 try
                 {
+                    ct.ThrowIfCancellationRequested();
                     using var d = Ch341Device.Open();
+                    ct.ThrowIfCancellationRequested();
                     return (true, $"CH341 adapter connected (DLL v{d.DllVersion}). Ready for SPI.");
                 }
                 catch (Ch341Exception ex) { return (false, ex.Message); }
             });
+            ct.ThrowIfCancellationRequested();
             HwAdapterText.Text = message;
             HwAdapterText.Foreground = ok ? Palette.GreenBrush : Palette.PeachBrush;
             HwLog("# " + message);
         }
+        catch (OperationCanceledException) { HwStageText.Text = "Cancelled."; }
         catch (Exception ex)
         {
             HwAdapterText.Text = ex.Message;
@@ -636,22 +746,28 @@ public partial class MainWindow : Window
         }
         finally
         {
+            _hwCts?.Dispose(); _hwCts = null;
             SetHwBusy(false);
         }
     }
 
     private async void OnHwIdentify(object sender, RoutedEventArgs e)
     {
+        if (_hardwareBusy || _closingRequested) return;
         ClearHardwareCapture(clearChip: true);
+        _hwCts = new CancellationTokenSource();
+        var ct = _hwCts.Token;
         SetHwBusy(true);
         HwStageText.Text = "Identifying chip…";
         try
         {
             var chip = await Task.Run(() =>
             {
+                ct.ThrowIfCancellationRequested();
                 using var d = Ch341Device.Open();
-                return SpiNorFlash.ReadId(d, HwLogBg);
-            });
+                return SpiNorFlash.ReadId(d, HwLogBg, ct);
+            }, ct);
+            ct.ThrowIfCancellationRequested();
             HwChipNameText.Text = chip.Name;
             HwChipIdText.Text = chip.IdHex;
             HwChipSizeText.Text = chip.SizeText;
@@ -692,19 +808,21 @@ public partial class MainWindow : Window
                 }
             }
         }
+        catch (OperationCanceledException) { HwStageText.Text = "Cancelled."; }
         catch (Exception ex)
         {
             HwShowError(ex.Message);
         }
         finally
         {
+            _hwCts?.Dispose(); _hwCts = null;
             SetHwBusy(false);
         }
     }
 
     private async void OnHwRead(object sender, RoutedEventArgs e)
     {
-        if (_hwChip is null || !_hwChip.SizeKnown || _hwChip.LooksEmpty) return;
+        if (_hardwareBusy || _closingRequested || _hwChip is null || !_hwChip.SizeKnown || _hwChip.LooksEmpty) return;
 
         var chip = _hwChip;
         ClearHardwareCapture(clearChip: false);
@@ -722,9 +840,11 @@ public partial class MainWindow : Window
         {
             var data = await Task.Run(() =>
             {
+                ct.ThrowIfCancellationRequested();
                 using var d = Ch341Device.Open();
                 return SpiNorFlash.ReadAll(d, chip, progress, HwLogBg, ct);
-            });
+            }, ct);
+            ct.ThrowIfCancellationRequested();
             if (data.LongLength != chip.SizeBytes)
                 throw new InvalidDataException(
                     $"SPI read returned {data.LongLength:N0} bytes; expected {chip.SizeBytes:N0}. The partial dump was discarded.");

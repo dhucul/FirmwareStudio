@@ -45,7 +45,7 @@ FirmwareStudio surfaces this instead of pretending otherwise, and labels every d
 |--------|---------|-----------|-------|
 | Universal READ BUFFER probe | `0x3C` mode 2 | any drive | Always safe. Reads whatever the controller's scratch buffer exposes. |
 | **MediaTek/Lite-On flash read** | `0x3C` mode 6 | MediaTek (Lite-On iHAS/iHBS) | Reads the firmware **flash** via the download-microcode-with-offsets addressing the official Lite-On/MediaTek updater uses (same read redumper's MT1959 flasher issues). The best software path for a real firmware image. Read-only — `0x3C` is data-in; the write/save microcode modes are `0x3B` WRITE BUFFER, never issued. |
-| MediaTek internal cache read | `0xF1` | MediaTek chipsets | Reads controller DRAM disc-cache (may hold firmware code; often empty when idle). Auto-**de-mirrors**: the controller aliases a small unique region (e.g. ~1 MiB) across the whole address window, so the read stops once the repeat is detected and keeps only the unique copy instead of an 8× mirror. |
+| MediaTek internal cache read | `0xF1` | MediaTek chipsets | Reads the raw controller DRAM/cache address window up to 8 MiB. Repeated, zero-filled, and sparse regions are preserved. Exact repetition is reported as an observation; bytes are never removed by a similarity heuristic. |
 | PLDS/Lite-On vendor read | `0xDF` | PLDS/Plextor/Lite-On | The Plextor/PLDS updater's vendor command; walks drive-state/RAM buffers. |
 | **NEC/Renesas RAM read** | `0xCC` / `0xCD` | Renesas/NEC (NEC ND-*, Optiarc AD-*, NEC-based Lite-On iHAS) | Ported from **binflash**. Identifies the drive from its firmware signatures, then dumps the model's flash range(s) — no unlock needed. Read-only: only the data-in `ReadRAM`/`ReadBoot` opcodes, never the `0xCC` erase/safe-mode sub-modes or `0xCB` WriteRAM. Some newer drives gate the full flash behind a "safe mode" state change this tool does not issue; those dump partially and are labelled as such. |
 | UHD Blu-ray service mode | — | supported UHD models | Detection only in v1. |
@@ -56,7 +56,7 @@ adapter + a SOIC-8 test clip:
 
 - **Detect adapter** → opens the CH341A (needs the WCH CH341PAR driver / `CH341DLLA64.dll`).
 - **Identify chip** → JEDEC `RDID (0x9F)` → manufacturer + size (capacity byte = log2(size)).
-- **Read flash** → `READ (0x03)` in 4 KB blocks over SPI → full ROM to `.bin` + JSON sidecar.
+- **Read flash** → revalidate JEDEC ID on the reopened adapter → `READ (0x03)` in 4 KB blocks over SPI → full ROM to `.bin` + JSON sidecar.
 
 Only works if the firmware is in an *external* SPI NOR flash (not inside the controller MCU). **Voltage
 warning:** the flash is 3.3 V; many CH341A clones output 5 V and can destroy the chip — use a 3.3 V-safe
@@ -76,9 +76,8 @@ dotnet run --project tools/FirmwareStudio.Smoke -- fwfile <image.1KN>
 `FirmwareImage.Parse` reads the PLDS/Lite-On **VPD wrapper** at the exact offsets the vendor updater uses
 (magic @0, `VPD_update_file` @0x400, model @0x414, build-date @0xE25A4, version @end−4), then classifies the
 image into regions by Shannon entropy (header / encrypted body / config-tables / padding), extracts strings,
-and — for the high-entropy body — detects an **ECB-mode block cipher** from repeated 16-byte ciphertext
-blocks. It labels the result honestly: on the Plextor PX-891SAF PLUS (MediaTek MT62SA) the ~700 KB body is
-ECB-encrypted with the **key resident in the controller** — the PC updater flashes it verbatim and the drive
+and — for the high-entropy body — reports repeated 16-byte blocks as a possible structural clue, without treating entropy or repetition as proof of encryption, provenance, or flashability. For the independently studied vendor image, on the Plextor PX-891SAF PLUS (MediaTek MT62SA) the ~700 KB body is
+reported by the vendor-protocol investigation as protected inside the controller — the PC updater flashes it verbatim and the drive
 decrypts internally, so this is *not* a plaintext ROM, and there is no PC-side decryptor to make it one.
 
 > **Why there's no software "read the ROM back" for this drive:** decompiling the official
@@ -137,6 +136,17 @@ The SCSI layer is a C# P/Invoke port of the pass-through code in the native Opti
 - For direct SPI reads, a CH341A adapter, a 3.3 V-safe connection, and the 64-bit WCH CH341PAR DLL and
   driver described in [`src/FirmwareStudio.Wpf/third_party/README.md`](src/FirmwareStudio.Wpf/third_party/README.md).
 
+## Capture integrity and file analysis
+
+- MTK flash and cache capture retain their raw address spaces (up to 4 MiB and 8 MiB respectively), including erased/blank gaps and repeated data. Full raw reads can take longer than the former early-exit heuristics.
+- Results distinguish **Complete**, **Partial**, **Unsupported**, and **Failed**. Complete means the requested range was read; it does not certify a flashable or full-ROM backup. Partial bytes remain available to save, with a termination reason in the UI and JSON.
+- Auto keeps the first informative capture in priority order, explicitly identifying a partial result. It does not silently replace a preferred partial flash capture with a lower-priority cache capture; individual methods remain available for follow-up. All unsuccessful attempts are summarized if no capture is available.
+- PLDS captures preserve the best successful response for each discovered slot, including short probes when larger reads fail.
+- Existing FirmwareStudio composite files are decoded into separate payloads before analysis. The 8051 export uses the decoded primary RAM payload; text headers and other regions never become code bytes.
+- Exact VPD/Pioneer/container recognition precedes loose RAM-content heuristics. Unrecognized files remain **Unknown**, and entropy alone never establishes flashability.
+- File analysis is cancellable and limited to 128 MiB inputs. ZIP-SFX parsing validates entry boundaries, decoded sizes and CRC32, and searches executable candidates for actual firmware. PE parsing bounds directory traversal and aggregate extracted payload bytes.
+- Optical identity and SPI JEDEC identity are checked again on the session used for capture. A changed identity requires fresh identification.
+
 ## Build & run
 
 Clone the repository, then build the solution:
@@ -156,7 +166,7 @@ src/FirmwareStudio.Wpf/bin/Debug/net10.0-windows/FirmwareStudio.exe
 In the app: pick a drive → **Identify** (shows vendor/model/firmware/serial/bus + detected chipset and
 which methods apply) → choose a method (or Auto) → **Extract firmware** → **Save dump…**. Every SCSI
 command is shown in the command-log pane; the hex pane previews the dump. Saving writes `<stem>.bin`,
-a `<stem>.json` metadata sidecar, and a `<stem>.log` command log as one atomic output set.
+a `<stem>.json` metadata sidecar, and a `<stem>.log` command log. Files are staged before promotion with best-effort rollback; recovery backups are retained and reported if restoration fails. This is not a crash-atomic multi-file transaction.
 
 ### Build the installer
 
@@ -192,5 +202,5 @@ clearly reports why the drive is unsupported (e.g. "needs a hardware programmer"
 - Auto tries vendor methods through bounded, read-only support probes and proceeds only when the command
   returns data or explicitly reports a recognized-but-invalid field; transient drive states do not trigger
   broad follow-up sweeps. Chipset detection informs the UI but is not treated as proof of command support.
-- Bounded command timeout + cancellation; every CDB is logged before it is issued.
+- Bounded capture windows and command timeouts. Cancellation is checked before and after each SCSI/SPI transfer; an in-flight native call may still need to finish. Closing the window cancels and waits for active work. Each SCSI CDB is announced before issue and logged with transport status on completion.
 - Requires administrator (enforced by the app manifest).

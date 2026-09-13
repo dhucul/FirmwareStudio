@@ -42,7 +42,11 @@ if (-not (Test-Path $iscc)) {
 }
 
 Write-Host "`n[2/2] Compiling installer with ISCC..." -ForegroundColor Yellow
-& $iscc $iss
+$publishDir = Join-Path $repo "src\FirmwareStudio.Wpf\bin\$Configuration\net10.0-windows\win-x64\publish"
+if (-not (Test-Path -LiteralPath (Join-Path $publishDir "FirmwareStudio.exe"))) {
+    throw "Published application not found in $publishDir"
+}
+& $iscc "/DPublishDir=$publishDir" $iss
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed (exit $LASTEXITCODE)" }
 
 # 3. Report output.

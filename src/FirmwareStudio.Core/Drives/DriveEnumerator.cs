@@ -11,14 +11,16 @@ namespace FirmwareStudio.Core.Drives;
 /// </summary>
 public static class DriveEnumerator
 {
-    public static IReadOnlyList<OpticalDrive> Scan()
+    public static IReadOnlyList<OpticalDrive> Scan(CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         var drives = new List<OpticalDrive>();
         if (!OperatingSystem.IsWindows()) return drives;
 
         uint mask = Native.GetLogicalDrives();
         for (int i = 0; i < 26; i++)
         {
+            ct.ThrowIfCancellationRequested();
             if ((mask & (1u << i)) == 0) continue;
             char letter = (char)('A' + i);
             string root = $"{letter}:\\";

@@ -16,6 +16,6 @@ public interface IFirmwareExtractionMethod
 
     MethodApplicability Evaluate(DriveIdentity id, ChipsetInfo chipset);
 
-    ExtractionResult Extract(ScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
+    ExtractionResult Extract(IScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
         IProgress<ExtractionProgress> progress, CancellationToken ct);
 }

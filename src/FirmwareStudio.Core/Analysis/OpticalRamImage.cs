@@ -67,7 +67,7 @@ public sealed class OpticalRamImageInfo
             sb.Append($"Embeds a {cb.Length / 1024} KiB {cb.Arch} code bank at 0x{cb.Offset:X} " +
                       $"(runtime = fileOffset {(cb.RuntimeDelta < 0 ? "-" : "+")} 0x{Math.Abs(cb.RuntimeDelta):X4}; " +
                       $"{cb.TargetsAligned}/{cb.TargetsTotal} call/jump targets aligned). ");
-        sb.Append("This is decrypted firmware as loaded in controller RAM — useful, but not a byte-exact flashable ROM.");
+        sb.Append("These structures are consistent with controller RAM; this analysis does not establish firmware provenance or a flashable ROM.");
         return sb.ToString();
     }
 }
@@ -95,11 +95,12 @@ public static class OpticalRamImage
         return hits >= 2;
     }
 
-    public static OpticalRamImageInfo Parse(byte[] data)
+    public static OpticalRamImageInfo Parse(byte[] data, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         // Build a 1:1 ASCII shadow so regex offsets map straight back to file offsets.
-        string ascii = ToAsciiShadow(data);
-        var (vendor, model, rev, build) = DetectIdentity(data, ascii);
+        string ascii = ToAsciiShadow(data, ct);
+        var (vendor, model, rev, build) = DetectIdentity(data, ascii, ct);
 
         return new OpticalRamImageInfo
         {
@@ -112,8 +113,8 @@ public static class OpticalRamImage
             Oem = DetectOem(ascii),
             Sections = DetectSections(data),
             Media = DetectMedia(data),
-            CodeBank = DetectCodeBank(data),
-            Content = DumpAnalyzer.Analyze(data, maxStrings: 120),
+            CodeBank = DetectCodeBank(data, ct),
+            Content = DumpAnalyzer.Analyze(data, maxStrings: 120, ct: ct),
         };
     }
 
@@ -185,12 +186,12 @@ public static class OpticalRamImage
     // Identity is a SCSI-INQUIRY layout: vendor(8) product(16) rev(4) then a yyyy/mm/dd build stamp.
     // We anchor on the date and slice the fixed-width fields sitting immediately before it. If the
     // plain copy isn't present, retry against a word-swapped copy of the buffer.
-    private static (string?, string?, string?, string?) DetectIdentity(byte[] data, string ascii)
+    private static (string?, string?, string?, string?) DetectIdentity(byte[] data, string ascii, CancellationToken ct)
     {
         var r = MatchIdentity(ascii);
         if (r.Item2 is not null) return r;
         // fall back to the word-swapped shadow
-        string swapped = ToAsciiShadow(Deswap(data));
+        string swapped = ToAsciiShadow(Deswap(data), ct);
         return MatchIdentity(swapped);
     }
 
@@ -270,12 +271,13 @@ public static class OpticalRamImage
     private static readonly HashSet<byte> SigOps =
         [0x02, 0x12, 0x22, 0x74, 0x75, 0x90, 0xA3, 0xE0, 0xF0, 0xE5, 0xF5, 0x85, 0xC0, 0xD0];
 
-    private static CodeBankInfo? DetectCodeBank(byte[] data)
+    private static CodeBankInfo? DetectCodeBank(byte[] data, CancellationToken ct)
     {
         const int win = 0x1000;
         int bestStart = -1; double bestD = 0;
         for (int off = 0; off + win <= data.Length; off += win)
         {
+            ct.ThrowIfCancellationRequested();
             int sig = 0;
             for (int i = off; i < off + win; i++) if (SigOps.Contains(data[i])) sig++;
             double d = 100.0 * sig / win;
@@ -285,8 +287,11 @@ public static class OpticalRamImage
 
         // grow the region left/right while density stays high
         int start = bestStart, end = bestStart + win;
-        while (start - win >= 0 && WindowDensity(data, start - win, win) >= 15.0) start -= win;
-        while (end + win <= data.Length && WindowDensity(data, end, win) >= 15.0) end += win;
+        // Export has a 16-bit code address space. Bound both detection work and inferred bank size.
+        while (start - win >= 0 && end - start < 0x10000 && WindowDensity(data, start - win, win) >= 15.0)
+        { ct.ThrowIfCancellationRequested(); start -= win; }
+        while (end + win <= data.Length && end - start < 0x10000 && WindowDensity(data, end, win) >= 15.0)
+        { ct.ThrowIfCancellationRequested(); end += win; }
 
         var (delta, aligned, total) = BestRuntimeDelta(data, start, end);
         return new CodeBankInfo
@@ -369,10 +374,15 @@ public static class OpticalRamImage
     }
 
     // ---- helpers ----
-    private static string ToAsciiShadow(ReadOnlySpan<byte> data)
+    private static string ToAsciiShadow(ReadOnlySpan<byte> data, CancellationToken ct)
     {
         var sb = new StringBuilder(data.Length);
-        foreach (byte b in data) sb.Append(b is >= 0x20 and < 0x7f ? (char)b : '\n');
+        for (int i = 0; i < data.Length; i++)
+        {
+            if ((i & 0xFFFF) == 0) ct.ThrowIfCancellationRequested();
+            byte b = data[i];
+            sb.Append(b is >= 0x20 and < 0x7f ? (char)b : '\n');
+        }
         return sb.ToString();
     }
 

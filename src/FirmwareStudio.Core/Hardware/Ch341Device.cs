@@ -4,7 +4,7 @@ namespace FirmwareStudio.Core.Hardware;
 /// A CH341A USB adapter opened in SPI mode. Full-duplex SPI transactions go through <see cref="SpiTransfer"/>,
 /// each of which frames one chip-select cycle (CS on D0, active low). Not thread-safe.
 /// </summary>
-public sealed class Ch341Device : IDisposable
+public sealed class Ch341Device : ISpiDevice, IDisposable
 {
     private static readonly IntPtr InvalidHandle = new(-1);
 

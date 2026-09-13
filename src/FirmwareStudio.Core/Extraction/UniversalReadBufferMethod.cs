@@ -27,9 +27,10 @@ public sealed class UniversalReadBufferMethod : IFirmwareExtractionMethod
     public MethodApplicability Evaluate(DriveIdentity id, ChipsetInfo chipset)
         => MethodApplicability.Yes("Standard READ BUFFER is safe to try on any drive.");
 
-    public ExtractionResult Extract(ScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
+    public ExtractionResult Extract(IScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
         IProgress<ExtractionProgress> progress, CancellationToken ct)
     {
+        device = device.WithCancellation(ct);
         progress.Report(new ExtractionProgress(0, "Scanning READ BUFFER descriptors"));
 
         var capacities = new List<(byte Id, int Capacity)>();
@@ -63,6 +64,7 @@ public sealed class UniversalReadBufferMethod : IFirmwareExtractionMethod
 
             var outData = new byte[total];
             int got = 0;
+            string stop = "complete";
             while (got < total)
             {
                 ct.ThrowIfCancellationRequested();
@@ -71,6 +73,7 @@ public sealed class UniversalReadBufferMethod : IFirmwareExtractionMethod
                     new byte[len], note: $"READ BUFFER data id={target.Id} off={got} len={len}");
                 if (!read.Good || read.Data is null)
                 {
+                    stop = read.StatusText;
                     progress.Report(new ExtractionProgress(0, null,
                         $"Buffer {target.Id} stopped at offset {got:N0} ({read.StatusText})."));
                     break;
@@ -80,6 +83,7 @@ public sealed class UniversalReadBufferMethod : IFirmwareExtractionMethod
                 int n = read.TransferredLength;
                 if (n <= 0 || n > len || n > read.Data.Length)
                 {
+                    stop = $"invalid/empty transfer length {n}/{len}";
                     progress.Report(new ExtractionProgress(0, null,
                         $"Buffer {target.Id} returned invalid/empty length {n} at offset {got:N0}."));
                     break;
@@ -92,10 +96,13 @@ public sealed class UniversalReadBufferMethod : IFirmwareExtractionMethod
             if (got > 0)
             {
                 byte[] result = got == total ? outData : outData[..got];
-                return ExtractionResult.Ok(Id, DisplayName, result,
-                    "controller buffer contents (may or may not be firmware/microcode)",
-                    $"Read {got:N0} bytes from controller buffer {target.Id}. " +
-                    $"Buffers with capacity: {string.Join(", ", capacities.Select(c => $"#{c.Id}={c.Capacity:N0}"))}.");
+                ct.ThrowIfCancellationRequested();
+                string summary = $"Read {got:N0}/{total:N0} bytes from controller buffer {target.Id}.";
+                const string label = "controller buffer contents (may or may not be firmware/microcode)";
+                return got == total
+                    ? ExtractionResult.Ok(Id, DisplayName, result, label, summary)
+                    : ExtractionResult.Partial(Id, DisplayName, result, label,
+                        summary + $" Read terminated before the advertised end: {stop}.");
             }
         }
 

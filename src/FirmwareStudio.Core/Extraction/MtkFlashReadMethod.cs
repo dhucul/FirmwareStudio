@@ -26,14 +26,7 @@ public sealed class MtkFlashReadMethod : IFirmwareExtractionMethod
 {
     private const byte FlashBufferId = 0x00;   // redumper reads the microcode region with buffer id 0
     private const int ChunkSize = 0x4000;      // 16 KiB per READ BUFFER — matches redumper's MT flash block granularity
-    // Backstop only — real reads end far earlier via error / zero-read / erased-0xFF run. 4 MiB clears any
-    // optical-drive firmware image (largest known are ~2 MiB Blu-ray) and still fits the 24-bit offset field.
-    private const int MaxSize = 0x400000;
-    // Bail if this many bytes hold no firmware-like data. A real MediaTek image carries code/ID within the
-    // first few KiB (redumper reads the drive ID at flash 0x3000), so 256 KiB of pure 0x00/0xFF reliably
-    // means "no firmware exposed here" while leaving generous headroom for any blank/erased leading region.
-    private const int EmptyExitThreshold = 0x40000;
-    private const int EndFfRun = 0x10000;      // 64 KiB of 0xFF ⇒ past the image (erase-block granularity)
+    private const int MaxSize = 0x400000; // bounded raw capture window
 
     public string Id => "mtk-flash";
     public string DisplayName => "MediaTek/Lite-On flash read (READ BUFFER 0x3C mode 6)";
@@ -53,8 +46,8 @@ public sealed class MtkFlashReadMethod : IFirmwareExtractionMethod
         if (IsMt62xxGeneration(id, chipset))
             return MethodApplicability.Perhaps(
                 "Newer MediaTek MT62xx (Plextor/PLDS PX-8xx): this generation rejects the READ BUFFER " +
-                "microcode-offset read and gates firmware behind the 0xDF vendor command — try it, but the " +
-                "PLDS/Lite-On 0xDF method is the likelier path.");
+                "microcode-offset read and does not expose firmware through mode 6. The " +
+                "PLDS/Lite-On 0xDF method can inspect registers, not a verified ROM.");
 
         return chipset.Family switch
         {
@@ -76,103 +69,38 @@ public sealed class MtkFlashReadMethod : IFirmwareExtractionMethod
            || (id.Vendor.StartsWith("PLEXTOR", StringComparison.OrdinalIgnoreCase)
                && id.Model.StartsWith("PX-8", StringComparison.OrdinalIgnoreCase));
 
-    public ExtractionResult Extract(ScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
+    public ExtractionResult Extract(IScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
         IProgress<ExtractionProgress> progress, CancellationToken ct)
     {
-        progress.Report(new ExtractionProgress(0, "MediaTek flash read (READ BUFFER 0x3C mode 6)"));
-
-        using var ms = new MemoryStream();
-        long meaningful = 0;   // bytes that are neither 0x00 (empty) nor 0xFF (erased) — i.e. firmware-like
-        int ffRun = 0;         // trailing run of 0xFF, to detect the erased tail past the firmware image
-        int offset = 0;
-        string stop = $"reached the {MaxSize / 1024} KiB safety cap";
-
-        while (offset < MaxSize)
+        device = device.WithCancellation(ct);
+        using var output = new MemoryStream();
+        string stop = "read the configured 4 MiB address window";
+        progress.Report(new ExtractionProgress(0, "Reading raw MediaTek flash window"));
+        while (output.Length < MaxSize)
         {
-            ct.ThrowIfCancellationRequested();
-
-            int len = Math.Min(ChunkSize, MaxSize - offset);
-            var r = device.SendCommand(ScsiCommand.ReadBufferMicrocode(FlashBufferId, offset, len),
-                ScsiDirection.In, new byte[len],
-                note: $"MTK flash read (0x3C/6) off=0x{offset:X} len=0x{len:X}");
-
-            // The first read doubles as the support probe. ILLEGAL REQUEST (key 0x05) = the drive does not
-            // implement the microcode-offset read; anything else means it understood the command.
-            if (offset == 0)
+            int length = (int)Math.Min(ChunkSize, MaxSize - output.Length);
+            var r = device.SendCommand(ScsiCommand.ReadBufferMicrocode(FlashBufferId, (int)output.Length, length),
+                ScsiDirection.In, new byte[length], note: $"MTK flash offset=0x{output.Length:X} length={length}");
+            if (!r.Good || !r.ValidTransferLength || r.TransferredLength == 0 || r.Data is null)
             {
-                var s = r.SenseInfo;
-                if (r.DeviceIoOk && r.ScsiStatus != 0x00 && s.Key == 0x05)
-                    return ExtractionResult.Unsupported(Id, DisplayName,
-                        $"The drive rejected READ BUFFER microcode-offset mode (ILLEGAL REQUEST, asc={s.Asc:X2}/{s.Ascq:X2}). " +
-                        "It does not expose the MediaTek/Lite-On firmware-download buffer over software; a hardware programmer may be required.");
-                if (!r.Good || r.Data is null)
-                    return ExtractionResult.Unsupported(Id, DisplayName,
-                        $"READ BUFFER microcode-offset mode did not return data ({r.StatusText}).");
-            }
-
-            if (!r.Good || r.Data is null)
-            {
-                stop = $"drive stopped responding at 0x{offset:X} ({r.StatusText})";
+                stop = !r.Good ? r.StatusText : !r.ValidTransferLength
+                    ? $"invalid transfer length {r.TransferredLength}/{length}" : "zero-byte transfer";
+                if (output.Length == 0)
+                    return r.DeviceIoOk && r.SenseInfo.IllegalRequest
+                        ? ExtractionResult.Unsupported(Id, DisplayName, stop)
+                        : ExtractionResult.Failed(Id, DisplayName, stop);
                 break;
             }
-
-            // Trust the transferred length — Windows SPTI reports it accurately — and only fall back to the
-            // full buffer if the reported value is out of range. A GOOD read of zero bytes means the readable
-            // flash is exhausted, so stop rather than pad the dump with zeros. A short-but-non-zero transfer
-            // is NOT end-of-data (some controllers cap a single READ BUFFER below the requested size), so keep
-            // reading from offset+got instead of truncating.
-            int got = r.TransferredLength;
-            if (got < 0 || got > len) got = len;
-            if (got == 0)
-            {
-                stop = $"empty read at 0x{offset:X} (end of readable flash)";
-                break;
-            }
-
-            ms.Write(r.Data, 0, got);
-            for (int i = 0; i < got; i++)
-            {
-                byte b = r.Data[i];
-                if (b == 0xFF) ffRun++;
-                else { ffRun = 0; if (b != 0x00) meaningful++; }
-            }
-            offset += got;
-            progress.Report(new ExtractionProgress((int)(100L * offset / MaxSize)));
-
-            if (meaningful == 0 && offset >= EmptyExitThreshold)
-            {
-                stop = $"no firmware-like data in the first {offset / 1024} KiB";
-                break;
-            }
-            if (ffRun >= EndFfRun && ms.Length > ffRun)
-            {
-                stop = $"reached erased flash (0xFF run) at 0x{offset - ffRun:X}";
-                break;
-            }
+            output.Write(r.Data, 0, r.TransferredLength);
+            progress.Report(new ExtractionProgress((int)(100 * output.Length / MaxSize)));
         }
-
-        byte[] raw = ms.ToArray();
-
-        if (meaningful == 0)
-            return ExtractionResult.Unsupported(Id, DisplayName, raw.Length == 0
-                ? $"READ BUFFER microcode-offset mode was accepted but returned no data ({stop}). This drive does " +
-                  "not expose firmware through this buffer; a hardware programmer may be required."
-                : $"READ BUFFER microcode-offset mode is accepted, but the {raw.Length:N0} bytes read were all " +
-                  "0x00 (empty) or 0xFF (erased) — this drive does not expose firmware through this buffer. " +
-                  "A hardware programmer may be required for a true ROM dump.");
-
-        // Trim the trailing erased-flash (0xFF) region so the dump ends at the last real byte. Only 0xFF (the
-        // definitive erased state) is trimmed — 0x00 could be legitimate zero-filled image data — and the
-        // amount removed is reported for transparency.
-        int end = raw.Length;
-        while (end > 0 && raw[end - 1] == 0xFF) end--;
-        byte[] data = end == raw.Length ? raw : raw[..end];
-        int trimmed = raw.Length - end;
-        string trimNote = trimmed > 0 ? $"; trimmed {trimmed:N0} B trailing 0xFF (erased)" : "";
-
-        return ExtractionResult.Ok(Id, DisplayName, data,
-            "MediaTek controller flash region via READ BUFFER 0x3C mode 6 (likely resident firmware/bootloader; not a verified byte-exact ROM)",
-            $"Read {data.Length:N0} bytes from the MediaTek flash via READ BUFFER 0x3C mode 6 " +
-            $"({100.0 * meaningful / Math.Max(1, data.Length):F1}% firmware-like, non-0x00/0xFF); {stop}{trimNote}.");
+        ct.ThrowIfCancellationRequested();
+        byte[] data = output.ToArray();
+        string summary = $"Captured raw addresses 0x000000..0x{data.Length:X6} ({data.Length:N0} bytes); {stop}. " +
+            "Zero-filled and erased spans are preserved; this is not a verified full ROM.";
+        const string label = "raw MediaTek controller flash window";
+        return data.Length == MaxSize
+            ? ExtractionResult.Ok(Id, DisplayName, data, label, summary)
+            : ExtractionResult.Partial(Id, DisplayName, data, label, summary);
     }
 }

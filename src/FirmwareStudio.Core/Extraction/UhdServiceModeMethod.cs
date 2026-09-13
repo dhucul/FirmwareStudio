@@ -28,9 +28,10 @@ public sealed class UhdServiceModeMethod : IFirmwareExtractionMethod
             : MethodApplicability.No("Not a recognised UHD Blu-ray drive; service-mode read does not apply.");
     }
 
-    public ExtractionResult Extract(ScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
+    public ExtractionResult Extract(IScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
         IProgress<ExtractionProgress> progress, CancellationToken ct)
     {
+        device = device.WithCancellation(ct);
         progress.Report(new ExtractionProgress(0, "UHD service mode"));
         return ExtractionResult.Unsupported(Id, DisplayName,
             "UHD Blu-ray service-mode read requires a supported drive/firmware and is not implemented in v1. " +

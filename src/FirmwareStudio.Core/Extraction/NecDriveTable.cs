@@ -397,8 +397,9 @@ public static class NecDriveTable
     /// Probes the drive for the NEC read command by reading the 4-byte firmware signatures at the probe
     /// addresses via <c>ReadRAM</c> (0xCC) and matching them. Read-only.
     /// </summary>
-    public static IdentifyResult Identify(ScsiDevice device)
+    public static IdentifyResult Identify(IScsiDevice device, CancellationToken ct = default)
     {
+        device = device.WithCancellation(ct);
         Signature? match = null;
         bool anyAccepted = false;
         var reads = new List<(uint Addr, string Code)>();
@@ -407,7 +408,7 @@ public static class NecDriveTable
         {
             var r = device.SendCommand(ScsiCommand.NecReadRam(false, addr, 0x20), ScsiDirection.In,
                 new byte[0x20], note: $"NEC ReadRAM 0xCC identify off=0x{addr:X}");
-            if (!r.Good || r.Data is null || r.Data.Length < 4 || r.TransferredLength < 4) continue;
+            if (!r.Good || !r.ValidTransferLength || r.Data is null || r.Data.Length < 4 || r.TransferredLength < 4) continue;
             anyAccepted = true;
             string code = Encoding.ASCII.GetString(r.Data, 0, 4);
             reads.Add((addr, code));

@@ -41,9 +41,10 @@ public sealed class NecRenesasReadMethod : IFirmwareExtractionMethod
             $"Detected {chipset.Family}; the NEC 0xCC ReadRAM read targets Renesas/NEC drives."),
     };
 
-    public ExtractionResult Extract(ScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
+    public ExtractionResult Extract(IScsiDevice device, DriveIdentity id, ChipsetInfo chipset,
         IProgress<ExtractionProgress> progress, CancellationToken ct)
     {
+        device = device.WithCancellation(ct);
         progress.Report(new ExtractionProgress(0, "NEC/Renesas RAM read (0xCC)"));
 
         // 1. Support probe = ReadBoot (0xCD). A non-NEC drive rejects it (ILLEGAL REQUEST); its sense gives a
@@ -54,7 +55,7 @@ public sealed class NecRenesasReadMethod : IFirmwareExtractionMethod
         bool bootRejected = probe.DeviceIoOk && probe.ScsiStatus != 0x00 && ps.Key == 0x05;
 
         // 2. Identify via ReadRAM (0xCC) signatures — this also confirms 0xCC works on the drive.
-        var ident = NecDriveTable.Identify(device);
+        var ident = NecDriveTable.Identify(device, ct);
 
         if (!ident.AnyAccepted)
         {
@@ -105,7 +106,7 @@ public sealed class NecRenesasReadMethod : IFirmwareExtractionMethod
             $"0xCC ReadRAM works but this drive is not in the binflash model table [signatures: {found}]. Best-effort range");
     }
 
-    private ExtractionResult DumpRegions(ScsiDevice device, IProgress<ExtractionProgress> progress,
+    private ExtractionResult DumpRegions(IScsiDevice device, IProgress<ExtractionProgress> progress,
         CancellationToken ct, NecDriveTable.FlashRegion[] regions, byte fwId, bool needsId,
         string label, string summaryHead)
     {
@@ -150,9 +151,9 @@ public sealed class NecRenesasReadMethod : IFirmwareExtractionMethod
 
         byte[] data = ms.ToArray();
 
-        if (data.Length == 0 || meaningful == 0)
-            return ExtractionResult.Unsupported(Id, DisplayName,
-                $"{summaryHead}, but no firmware-like data was read ({stop})." +
+        if (data.Length == 0)
+            return ExtractionResult.Failed(Id, DisplayName,
+                $"{summaryHead}, but no data was read ({stop})." +
                 (needsId
                     ? " This drive gates its flash behind 'safe mode' — a state-changing vendor command this " +
                       "read-only tool does not issue — so the region is unreadable here. A hardware programmer may be required."
@@ -162,10 +163,11 @@ public sealed class NecRenesasReadMethod : IFirmwareExtractionMethod
             ? " Note: truncated — this drive likely needs 'safe mode' (a state change this read-only tool does not issue) to read the whole flash."
             : truncated ? " Note: the dump was truncated before the end of the range." : "";
 
-        return ExtractionResult.Ok(Id, DisplayName, data,
-            label + " (not a verified byte-exact ROM)",
-            $"{summaryHead}: read {data.Length:N0} bytes via 0xCC ReadRAM " +
-            $"({100.0 * meaningful / Math.Max(1, data.Length):F1}% firmware-like, non-0x00/0xFF); {stop}.{note}");
+        ct.ThrowIfCancellationRequested();
+        string summary = $"{summaryHead}: read {data.Length:N0}/{total:N0} bytes via 0xCC ReadRAM; {stop}.{note}";
+        return truncated
+            ? ExtractionResult.Partial(Id, DisplayName, data, label, summary)
+            : ExtractionResult.Ok(Id, DisplayName, data, label, summary);
     }
 
     private static string Printable(string s)
