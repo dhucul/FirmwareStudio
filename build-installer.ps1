@@ -32,13 +32,19 @@ if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed (exit $LASTEXITCODE)" }
 
 # 2. Compile the Inno Setup script.
 $iss = Join-Path $repo "installer\FirmwareStudio.iss"
-$iscc = Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"
-if (-not (Test-Path $iscc)) {
-    # Fall back to the machine-wide install location.
-    $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-}
-if (-not (Test-Path $iscc)) {
-    throw "ISCC.exe not found. Install Inno Setup 6 (https://jrsoftware.org/isdl.php)."
+# Use an existing compiler from PATH or the standard Inno Setup 7/6 locations.
+$compilerCandidates = @(
+    (Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
+    foreach ($major in 7, 6) {
+        Join-Path $env:LOCALAPPDATA "Programs\Inno Setup $major\ISCC.exe"
+        Join-Path $env:ProgramFiles "Inno Setup $major\ISCC.exe"
+        Join-Path ${env:ProgramFiles(x86)} "Inno Setup $major\ISCC.exe"
+    }
+)
+$iscc = $compilerCandidates | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
+    Select-Object -First 1
+if (-not $iscc) {
+    throw "ISCC.exe not found. Install Inno Setup 6 or 7 (https://jrsoftware.org/isdl.php), or add its directory to PATH."
 }
 
 Write-Host "`n[2/2] Compiling installer with ISCC..." -ForegroundColor Yellow
